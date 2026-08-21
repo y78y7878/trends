@@ -1,0 +1,21 @@
+[project]
+name = "trends"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "y78y7878", email = "y78y7878@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "feedparser>=6.0.14",
+    "pymysql>=1.2.0",
+    "python-dateutil>=2.9.0.post0",
+]
+
+[project.scripts]
+trends = "trends:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
