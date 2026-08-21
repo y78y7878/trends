@@ -1,6 +1,6 @@
 # Social Media Trends Scraper (社群與搜尋趨勢爬蟲)
 
-這是一個用來自動抓取台灣 Google Trends 熱搜關鍵字及社群平台（目前支援 Dcard、PTT）熱門文章的 Python 爬蟲專案。透過自動化瀏覽器側錄 API 封包，獲取熱門文章的標題、連結、作者及互動熱度，並將資料持久化儲存至 MariaDB 資料庫中，以利後續的數據分析或趨勢落差比對。
+這是一個用來自動抓取台灣 Google Trends 熱搜關鍵字及社群平台（目前支援PTT）熱門文章的 Python 爬蟲專案。透過自動化瀏覽器側錄 API 封包，獲取熱門文章的標題、連結、作者及互動熱度，並將資料持久化儲存至 MariaDB 資料庫中，以利後續的數據分析或趨勢落差比對。
 
 ## ✨ 特色 (Features)
 * **無頭瀏覽器側錄**：使用 Playwright 模擬真實瀏覽器行為，透過監聽網路請求（Network Interception）側錄原生 API 回應，減少直接打 API 被阻擋的風險。
