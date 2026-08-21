@@ -1,12 +1,15 @@
 from bs4 import BeautifulSoup
 import pymysql
 import requests
+import os
+username = os.getenv("USERNAME")
+password = os.getenv("PASSWORD")
 
 # 1. 資料庫連線設定
 conn = pymysql.connect(
     host="localhost",
-    user="root",
-    password="1234",
+    user=username,
+    password=password,
     database="trends",
     charset="utf8mb4",
     autocommit=True,

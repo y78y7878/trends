@@ -2,12 +2,14 @@ import xml.etree.ElementTree as ET
 from dateutil import parser
 import pymysql
 import requests
-
+import os
+username = os.getenv("USERNAME")
+password = os.getenv("PASSWORD")
 # 1. 連接 MariaDB
 conn = pymysql.connect(
     host="localhost",
-    user="root",
-    password="1234",  # 請改為你的資料庫密碼
+    user=username,
+    password=password,
     database="trends",
     charset="utf8mb4",
     autocommit=True,
