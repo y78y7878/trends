@@ -14,19 +14,19 @@
 
 ## 🚀 快速開始 (Quick Start)
 
-### 1.安裝套件
+### 1. 安裝套件
 請先在您的虛擬環境中安裝所需的 Python 套件：
 ```bash
 pip install playwright pymysql python-dateutil
-
-### 2. 初始化 Playwright 瀏覽器
+2. 初始化 Playwright 瀏覽器
 安裝 Playwright 運行所需的 Chromium 核心：
-```bash
-playwright install chromium
 
-### 3. 建置資料庫
+Bash
+playwright install chromium
+3. 建置資料庫
 請進入您的 MariaDB 控制台，建立資料庫（例如 trends）並執行以下 SQL 語法建立資料表：
-```bash
+
+SQL
 CREATE DATABASE IF NOT EXISTS trends CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE trends;
 
@@ -41,10 +41,10 @@ CREATE TABLE social_trends (
     published_at DATETIME,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-
-### 4. 設定資料庫密碼
+4. 設定資料庫密碼
 在 dcard_trends.py 檔案中，找到資料庫連線區塊，將密碼修改為您本地端的設定：
-```bash
+
+Python
 conn = pymysql.connect(
     host="localhost",
     user="root",
@@ -52,10 +52,18 @@ conn = pymysql.connect(
     database="trends",
     ...
 )
-
-### 5. 執行爬蟲
-```bash
+5. 執行爬蟲
+Bash
 python dcard_trends.py
+⚠️ 已知問題與待辦事項 (Known Issues & TODOs)
+[ ] Dcard 爬取穩定性問題：目前 Dcard 的 Cloudflare 防護極為嚴格，偶爾會觸發 HTTP 403 (Forbidden) 阻擋或 HTTP 429 (Too Many Requests) 限流。目前的解法是攔截前端原生封包，但若同 IP 請求過於頻繁，仍可能暫時抓不到資料（需等待 3~5 分鐘冷卻）。後續考慮引入代理池（Proxy Pool）或拉長排程間距。
+
+[ ] 支援更多社群平台（如 PTT、Threads 等）。
+
+[ ] 新增資料重複性檢查（使用 content_url 判斷是否已存在於資料庫）。
+
+📜 免責聲明 (Disclaimer)
+本專案僅供程式語言學習與技術研究之用。請遵守各平台的服務條款（Terms of Service），切勿將此工具用於惡意攻擊、高頻率壓測或商業營利用途。
 
 ## 資料庫 Schema 設計 (Database Schema)
 
