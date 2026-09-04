@@ -1,6 +1,6 @@
 import xml.etree.ElementTree as ET
 from dateutil import parser
-import pymysql
+import snowflake.connector # 改用 snowflake 套件
 import requests
 import os
 import time
@@ -9,28 +9,25 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 load_dotenv()
-print("--- 驗證環境變數 ---")
-print("讀取到的帳號:", os.getenv("DB_USER"))
-print("讀取到的密碼:", "已讀取" if os.getenv("DB_PASS") else "未讀取(None)")
+print("--- 驗證 Snowflake 環境變數 ---")
+print("讀取到的帳號:", os.getenv("SNOWFLAKE_USER"))
+print("讀取到的密碼:", "已讀取" if os.getenv("SNOWFLAKE_PASS") else "未讀取(None)")
 
 def fetch_google_trends():
-    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 開始執行 Google Trends 抓取排程...")
-    
-    username = os.getenv("DB_USER")
-    password = os.getenv("DB_PASS")
+    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 開始執行 Google Trends 抓取排程 (寫入 Snowflake)...")
     
     conn = None
     cursor = None
     
     try:
-        # 1. 連接 MariaDB
-        conn = pymysql.connect(
-            host="localhost",
-            user=username,
-            password=password,
-            database="trends",
-            charset="utf8mb4",
-            autocommit=True,
+        # 1. 連接 Snowflake
+        conn = snowflake.connector.connect(
+            user=os.getenv("SNOWFLAKE_USER"),
+            password=os.getenv("SNOWFLAKE_PASS"),
+            account=os.getenv("SNOWFLAKE_ACCOUNT"),
+            warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
+            database=os.getenv("SNOWFLAKE_DATABASE"),
+            schema=os.getenv("SNOWFLAKE_SCHEMA")
         )
         cursor = conn.cursor()
 
@@ -44,14 +41,14 @@ def fetch_google_trends():
         response = requests.get(rss_url, headers=headers, timeout=10)
         response.encoding = "utf-8"
 
-        # 3. 解析 XML 並定義命名空間
+        # 3. 解析 XML
         root = ET.fromstring(response.text)
         namespaces = {
             "ht": "https://trends.google.com/trending/rss",
             "atom": "http://www.w3.org/2005/Atom",
         }
 
-        # 4. 逐一處理每個熱搜項目 (<item>)
+        # 4. 處理熱搜項目
         for item in root.findall(".//item"):
             keyword = item.findtext("title", default="").strip()
 
@@ -67,13 +64,25 @@ def fetch_google_trends():
                 else None
             )
 
-            # A. 寫入主資料表
+            # A. 寫入主資料表 (修正：拿掉不支援的 RETURNING id)
             sql_trend = """
                 INSERT INTO google_trends (keyword, approx_traffic, published_at)
                 VALUES (%s, %s, %s)
             """
             cursor.execute(sql_trend, (keyword, approx_traffic, published_at))
-            trend_id = cursor.lastrowid
+            
+            # 替代方案：透過 SELECT 把剛才寫入的 ID 抓出來給新聞子項目用
+            cursor.execute("""
+                SELECT id FROM google_trends 
+                WHERE keyword = %s AND published_at = %s 
+                ORDER BY id DESC LIMIT 1
+            """, (keyword, published_at))
+            
+            row = cursor.fetchone()
+            if not row:
+                continue # 如果防呆沒抓到資料就跳過，避免報錯
+            
+            trend_id = row[0]
 
             # B. 寫入新聞子項目
             news_items = item.findall("ht:news_item", namespaces)
@@ -97,22 +106,22 @@ def fetch_google_trends():
                         sql_news, (trend_id, news_title, news_url, news_source)
                     )
 
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 排程寫入成功！")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Snowflake 排程寫入成功！")
 
     except Exception as e:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 執行時發生錯誤: {e}")
         
     finally:
+        # 5. 確保釋放資源
         if cursor is not None:
             cursor.close()
-        if conn is not None and conn.open:
+        if conn is not None and not conn.is_closed():
             conn.close()
 
 # ========== 排程設定區塊 ==========
 if __name__ == "__main__":
     scheduler = BackgroundScheduler()
     
-    # 將 next_run_time 設為當前時間，排程器一啟動就會自動執行第 1 次，並於 10 分鐘後執行第 2 次
     scheduler.add_job(
         fetch_google_trends, 
         'interval', 
@@ -121,7 +130,7 @@ if __name__ == "__main__":
     )
     
     scheduler.start()
-    print("\n系統提示：APScheduler 自動抓取排程已啟動，每 10 分鐘自動執行一次。")
+    print("\n系統提示：APScheduler 抓取排程 (Snowflake 版) 已啟動，每 10 分鐘執行一次。")
     print("請保持此視窗開啟，若要停止請按 Ctrl+C。")
     
     try:
