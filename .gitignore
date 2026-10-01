@@ -8,3 +8,16 @@ wheels/
 .env
 # Virtual environments
 .venv
+# SQLite 資料庫檔案
+*.db
+*.sqlite
+*.sqlite3
+db.sqlite3
+
+# 忽略 Python 產生的快取檔 (選擇性)
+__pycache__/
+*.pyc
+
+
+# 視情況忽略原始 sql 資料檔 (若為機密資料請解除下方註解)
+# raw_data/*.sql
