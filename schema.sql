@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS keyword_classification (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS news_theme_classification (
+    news_id INTEGER PRIMARY KEY,
+    keyword TEXT NOT NULL,
+    theme_name TEXT NOT NULL,
+    sub_theme TEXT,
+    sentiment TEXT,
+    event_type TEXT,
+    confidence_score REAL NOT NULL DEFAULT 0,
+    classified_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS classification_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     keyword TEXT NOT NULL,

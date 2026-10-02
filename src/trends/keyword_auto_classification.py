@@ -11,7 +11,9 @@ from sqlalchemy.engine import Engine
 from trends.database import (
     ClassificationLog,
     GoogleTrend,
+    GoogleTrendNews,
     KeywordClassification,
+    NewsThemeClassification,
     get_engine,
     init_db,
 )
@@ -193,6 +195,74 @@ def build_keyword_quality_summary(engine: Engine | None = None) -> dict[str, flo
         "coverage_rate": float(coverage_rate),
         "need_review_keywords": int(need_review),
     }
+
+
+def classify_pending_news_theme(
+    engine: Engine | None = None,
+    limit: int = 200,
+) -> int:
+    db_engine = init_db(engine or get_engine())
+    with db_engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                GoogleTrendNews.id.label("news_id"),
+                GoogleTrend.keyword,
+                GoogleTrendNews.news_title,
+                GoogleTrendNews.news_source,
+                GoogleTrendNews.news_sentiment,
+                GoogleTrendNews.event_type,
+                KeywordClassification.theme_name,
+                KeywordClassification.sub_theme,
+                KeywordClassification.confidence_score,
+            )
+            .join(GoogleTrend, GoogleTrend.id == GoogleTrendNews.trend_id)
+            .outerjoin(KeywordClassification, KeywordClassification.keyword == GoogleTrend.keyword)
+            .outerjoin(NewsThemeClassification, NewsThemeClassification.news_id == GoogleTrendNews.id)
+            .where(
+                GoogleTrendNews.news_title.is_not(None),
+                NewsThemeClassification.news_id.is_(None),
+            )
+            .order_by(GoogleTrendNews.id)
+            .limit(limit if limit > 0 else None)
+        ).all()
+    if not rows:
+        return 0
+
+    payload = []
+    for row in rows:
+        theme_name = str(row.theme_name or "其他").strip() or "其他"
+        sub_theme = str(row.sub_theme or "其他").strip() or "其他"
+        sentiment = str(row.news_sentiment or "Neutral").strip() or "Neutral"
+        event_type = str(row.event_type or "其他").strip() or "其他"
+        confidence_score = float(row.confidence_score or 0.0)
+        payload.append({
+            "news_id": int(row.news_id),
+            "keyword": str(row.keyword or ""),
+            "theme_name": theme_name,
+            "sub_theme": sub_theme,
+            "sentiment": sentiment,
+            "event_type": event_type,
+            "confidence_score": max(0.0, min(1.0, confidence_score)),
+        })
+    if not payload:
+        return 0
+    with db_engine.begin() as connection:
+        connection.execute(
+            NewsThemeClassification.__table__.insert(),
+            [
+                {
+                    "news_id": item["news_id"],
+                    "keyword": item["keyword"],
+                    "theme_name": item["theme_name"],
+                    "sub_theme": item["sub_theme"],
+                    "sentiment": item["sentiment"],
+                    "event_type": item["event_type"],
+                    "confidence_score": item["confidence_score"],
+                }
+                for item in payload
+            ],
+        )
+    return len(payload)
 
 
 if __name__ == "__main__":

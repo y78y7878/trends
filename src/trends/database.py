@@ -102,6 +102,19 @@ class KeywordClassification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class NewsThemeClassification(Base):
+    __tablename__ = "news_theme_classification"
+
+    news_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    theme_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    sub_theme: Mapped[str | None] = mapped_column(String(100))
+    sentiment: Mapped[str | None] = mapped_column(String(20))
+    event_type: Mapped[str | None] = mapped_column(String(50))
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+    classified_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
 class ClassificationLog(Base):
     __tablename__ = "classification_log"
 
@@ -172,6 +185,13 @@ def init_db(engine: Engine | None = None) -> Engine:
         "keyword_classification": {
             "need_review": "INTEGER NOT NULL DEFAULT 0",
             "reviewed_at": "DATETIME",
+        },
+        "news_theme_classification": {
+            "theme_name": "VARCHAR(100)",
+            "sub_theme": "VARCHAR(100)",
+            "sentiment": "VARCHAR(20)",
+            "event_type": "VARCHAR(50)",
+            "confidence_score": "FLOAT DEFAULT 0",
         },
     }
     with db_engine.begin() as connection:

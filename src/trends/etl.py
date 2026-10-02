@@ -20,7 +20,10 @@ from trends.database import (
     get_engine,
     init_db,
 )
-from trends.keyword_auto_classification import auto_classify_unclassified_keywords
+from trends.keyword_auto_classification import (
+    auto_classify_unclassified_keywords,
+    classify_pending_news_theme,
+)
 from trends.keyword_classification import classify_pending_keywords, classify_pending_news
 from trends.theme_study import sync_theme_mapping
 
@@ -120,6 +123,7 @@ def run_daily_etl(
     except RuntimeError as error:
         print(f"News AI classification skipped: {error}")
         news_rows = 0
+    theme_news_rows = classify_pending_news_theme(db_engine, limit=max(200, news_limit))
     stats_rows = refresh_theme_daily_stats(db_engine)
     return {
         "mapping_rows": mapping_rows,
@@ -127,6 +131,7 @@ def run_daily_etl(
         "quality_classified_keywords": quality_rows,
         "history_rows": history_rows,
         "classified_news": news_rows,
+        "classified_news_theme": theme_news_rows,
         "daily_stat_themes": stats_rows,
     }
 

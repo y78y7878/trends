@@ -464,7 +464,10 @@ def build_post_news_returns(
 
 
 def build_theme_news_timeline(observations: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
-    columns = ["date", "keyword", "news_title", "news_source", "news_url"]
+    columns = [
+        "date", "keyword", "news_title", "news_source", "news_url",
+        "news_sentiment", "event_type", "theme_name", "sub_theme",
+    ]
     if observations.empty or not keywords:
         return pd.DataFrame(columns=columns)
 
@@ -474,11 +477,15 @@ def build_theme_news_timeline(observations: pd.DataFrame, keywords: list[str]) -
     fetched_at = pd.to_datetime(frame["fetched_at"], errors="coerce")
     frame["date"] = frame["date"].fillna(fetched_at)
     frame["date"] = frame["date"].dt.normalize()
+    frame["news_sentiment"] = frame.get("news_sentiment", pd.Series(dtype="object")).fillna("Neutral")
+    frame["event_type"] = frame.get("event_type", pd.Series(dtype="object")).fillna("其他")
+    frame["theme_name"] = frame.get("classification_theme", pd.Series(dtype="object")).fillna("其他")
+    frame["sub_theme"] = frame.get("sub_theme", pd.Series(dtype="object")).fillna("其他")
     keyword_lookup = _keyword_lookup(keywords)
     frame["keyword"] = frame[source_keyword].fillna(frame["keyword"]).map(
         lambda value: keyword_lookup.get(_normalize_keyword(value))
     )
-    frame = frame.dropna(subset=["date", "keyword"])
+    frame = frame.dropna(subset=["date", "keyword"]) 
     frame = frame[frame["news_title"].fillna("").astype(str).str.strip().ne("")]
     if frame.empty:
         return pd.DataFrame(columns=columns)

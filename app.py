@@ -120,8 +120,11 @@ def load_trend_observations() -> pd.DataFrame:
             GoogleTrendNews.news_title,
             GoogleTrendNews.news_url,
             GoogleTrendNews.news_source,
+            GoogleTrendNews.news_sentiment,
+            GoogleTrendNews.event_type,
             KeywordClassification.canonical_keyword,
             KeywordClassification.theme_name.label("classification_theme"),
+            KeywordClassification.sub_theme,
         )
         .outerjoin(GoogleTrendNews, GoogleTrendNews.trend_id == GoogleTrend.id)
         .outerjoin(KeywordClassification, KeywordClassification.keyword == GoogleTrend.keyword)
@@ -542,63 +545,86 @@ def page_theme_study() -> None:
         st.metric("新聞數量", f"{news_count:,}")
         st.metric("熱度平均領先", average_lead)
 
-    st.subheader("Google Trends 熱度")
-    st.caption("每個關鍵字的 Google Trends 分數各自正規化為 0–100，適合比較同一關鍵字的時間變化，不代表不同關鍵字的絕對搜尋量。")
+    st.subheader("Google Trends × News × 股價同步時間軸")
+    st.caption("依序觀察 Google Trends 熱度、新聞發布與股票相對報酬，對照事件發生的先後關係。")
+    with st.container(horizontal=True):
+        show_ma5 = st.checkbox("MA5", value=False, key=f"show_ma5_{theme_name}")
+        show_ma20 = st.checkbox("MA20", value=False, key=f"show_ma20_{theme_name}")
+        show_ma60 = st.checkbox("MA60", value=False, key=f"show_ma60_{theme_name}")
     if daily_heat.empty:
         show_empty("尚無歷史熱度；執行 `python -m trends.trend_history_collector` 回補近 90 天資料。")
     else:
-        heat_figure = go.Figure()
+        synchronized_figure = make_subplots(specs=[[{"secondary_y": True}]])
         for keyword, keyword_rows in daily_heat.groupby("keyword", sort=False):
-            heat_figure.add_trace(go.Scatter(
+            synchronized_figure.add_trace(go.Scatter(
                 x=keyword_rows["date"], y=keyword_rows["heat"], mode="lines", name=keyword,
+                line={"width": 2.5},
                 hovertemplate=f"{keyword}<br>%{{x|%Y-%m-%d}}<br>熱度：%{{y}}<extra></extra>",
-            ))
-        theme_daily = daily_heat.groupby("date", as_index=False)["heat"].mean().rename(columns={"heat": "theme_heat"})
-        heat_figure.add_trace(go.Scatter(
-            x=theme_daily["date"], y=theme_daily["theme_heat"], mode="lines", name="主題平均熱度",
-            line={"width": 3, "color": "#20291f"},
-        ))
+            ), secondary_y=False)
         if not news.empty:
-            news_markers = news.merge(theme_daily, on="date", how="left")
-            news_markers["theme_heat"] = news_markers["theme_heat"].fillna(theme_daily["theme_heat"].max())
-            heat_figure.add_trace(go.Scatter(
-                x=news_markers["date"], y=news_markers["theme_heat"], mode="markers", name="RSS 新聞",
-                marker={"symbol": "diamond", "size": 10, "color": "#db795e"},
-                customdata=news_markers[["keyword", "news_title", "news_source"]],
-                hovertemplate="%{customdata[0]}<br>%{x|%Y-%m-%d}<br>%{customdata[1]}<br>來源：%{customdata[2]}<extra></extra>",
-            ))
-        heat_figure.update_layout(height=410, xaxis_title="日期", yaxis_title="每日熱度 0–100", hovermode="x unified", legend={"orientation": "h", "y": 1.12})
-        st.plotly_chart(heat_figure, width="stretch")
-
-    st.subheader("股票相對報酬與技術指標")
-    if relative_returns.empty:
-        show_empty("所選股票尚無可用日行情。")
-    else:
-        extra_rows = [indicator for indicator in ("Volume", "RSI", "MACD") if indicator in indicators]
-        subplot_titles = ["相對報酬（首日 = 100）", *extra_rows]
-        performance_figure = make_subplots(rows=len(subplot_titles), cols=1, shared_xaxes=True, vertical_spacing=0.08, subplot_titles=subplot_titles)
-        for stock_id, stock_path in technical_frame.groupby("stock_id", sort=False):
-            stock_path = stock_path.sort_values("date")
-            performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["base_100"], mode="lines", name=f"{stock_id} 股價"), row=1, col=1)
-            for indicator, column in (("MA5", "ma5"), ("MA20", "ma20"), ("MA60", "ma60")):
-                if indicator in indicators:
-                    performance_figure.add_trace(go.Scatter(
-                        x=stock_path["date"], y=stock_path[column], mode="lines", name=f"{stock_id} {indicator}",
-                        line={"dash": "dot"},
-                    ), row=1, col=1)
-        for row_number, indicator in enumerate(extra_rows, start=2):
+            news_markers = news.copy()
+            sentiment_palette = {"Positive": "#2e7d32", "Neutral": "#f9a825", "Negative": "#d32f2f"}
+            for sentiment, color in sentiment_palette.items():
+                subset = news_markers[news_markers["news_sentiment"].fillna("Neutral").eq(sentiment)]
+                if subset.empty:
+                    continue
+                marker_y = subset["date"].map(lambda _: 100)
+                synchronized_figure.add_trace(go.Scatter(
+                    x=subset["date"], y=marker_y, mode="markers", name=f"新聞：{sentiment}",
+                    marker={"symbol": "diamond", "size": 10, "color": color, "line": {"width": 1, "color": "#ffffff"}},
+                    customdata=subset[["news_title", "news_source", "news_sentiment", "event_type"]],
+                    hovertemplate=(
+                        "日期：%{x|%Y-%m-%d}<br>"
+                        "新聞標題：%{customdata[0]}<br>"
+                        "來源：%{customdata[1]}<br>"
+                        "情緒：%{customdata[2]}<br>"
+                        "事件類型：%{customdata[3]}<extra></extra>"
+                    ),
+                ), secondary_y=False)
+        if not relative_returns.empty:
             for stock_id, stock_path in technical_frame.groupby("stock_id", sort=False):
                 stock_path = stock_path.sort_values("date")
-                if indicator == "Volume":
-                    performance_figure.add_trace(go.Bar(x=stock_path["date"], y=stock_path["volume"], name=f"{stock_id} Volume", opacity=0.55), row=row_number, col=1)
-                elif indicator == "RSI":
-                    performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["rsi"], mode="lines", name=f"{stock_id} RSI"), row=row_number, col=1)
-                else:
-                    performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["macd"], mode="lines", name=f"{stock_id} MACD"), row=row_number, col=1)
-                    performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["macd_signal"], mode="lines", name=f"{stock_id} MACD Signal", line={"dash": "dot"}), row=row_number, col=1)
-        performance_figure.update_layout(height=320 + 180 * len(extra_rows), hovermode="x unified", legend={"orientation": "h", "y": 1.08})
-        performance_figure.update_yaxes(title_text="Base = 100", row=1, col=1)
-        st.plotly_chart(performance_figure, width="stretch")
+                synchronized_figure.add_trace(go.Scatter(
+                    x=stock_path["date"], y=stock_path["base_100"], mode="lines",
+                    name=f"{stock_id} 相對報酬", line={"width": 2.5},
+                    hovertemplate=f"{stock_id}<br>%{{x|%Y-%m-%d}}<br>相對報酬：%{{y:.2f}}<extra></extra>",
+                ), secondary_y=True)
+                for enabled, indicator, column in (
+                    (show_ma5, "MA5", "ma5"),
+                    (show_ma20, "MA20", "ma20"),
+                    (show_ma60, "MA60", "ma60"),
+                ):
+                    if enabled:
+                        synchronized_figure.add_trace(go.Scatter(
+                            x=stock_path["date"], y=stock_path[column], mode="lines",
+                            name=f"{stock_id} {indicator}", line={"dash": "dot", "width": 1.2},
+                            hovertemplate=f"{stock_id} {indicator}<br>%{{x|%Y-%m-%d}}<br>值：%{{y:.2f}}<extra></extra>",
+                        ), secondary_y=True)
+        synchronized_figure.update_layout(
+            height=560,
+            xaxis_title="日期",
+            template="plotly_white",
+            hovermode="closest",
+            legend={"orientation": "h", "y": 1.12},
+        )
+        synchronized_figure.update_yaxes(title_text="Google Trends 熱度 / 新聞事件", secondary_y=False)
+        synchronized_figure.update_yaxes(title_text="股價相對報酬（Base = 100）", secondary_y=True)
+        st.plotly_chart(synchronized_figure, width="stretch")
+
+    st.subheader("新聞事件列表")
+    if not news.empty:
+        news_display = news.copy()
+        news_display["新聞日期"] = pd.to_datetime(news_display["date"]).dt.strftime("%Y-%m-%d")
+        news_display = news_display.rename(columns={
+            "keyword": "關鍵字", "news_title": "新聞標題", "news_source": "新聞來源",
+            "news_url": "新聞連結", "news_sentiment": "情緒", "event_type": "事件類型",
+        })
+        st.dataframe(news_display[["新聞日期", "關鍵字", "新聞標題", "新聞來源", "事件類型", "情緒", "新聞連結"]],
+            column_config={"新聞連結": st.column_config.LinkColumn(display_text="開啟")},
+            hide_index=True,
+        )
+    else:
+        show_empty("此主題目前沒有匹配的 RSS 新聞。")
 
     st.subheader("關鍵字與股票 Pearson Heatmap")
     if same_day.empty:
