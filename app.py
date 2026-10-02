@@ -5,16 +5,30 @@ import inspect
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from sqlalchemy import or_, select
 
 import trends.event_study
 
 from trends.alpha_signal import parse_traffic, score_signals
-from trends.database import GoogleTrend, GoogleTrendNews, Stock, get_engine, init_db
+from trends.database import GoogleTrend, GoogleTrendNews, GoogleTrendsHistory, Stock, ThemeMapping, get_engine, init_db
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
 from trends.sentiment import analyze_pending_news
 from trends.stock_collector import fetch_and_store
+from trends.theme_study import (
+    build_daily_theme_heat,
+    build_cross_correlations,
+    build_heat_price_correlations,
+    build_post_news_returns,
+    build_relative_returns,
+    build_stock_technicals,
+    build_theme_coverage,
+    build_theme_definitions,
+    build_theme_news_timeline,
+    build_unclassified_keywords,
+    sync_theme_mapping,
+)
 
 
 if "start_date" not in inspect.signature(trends.event_study.build_event_frame).parameters:
@@ -30,7 +44,7 @@ RESEARCH_START = pd.Timestamp(RESEARCH_START_DATE)
 EVENT_CLUSTER_GAP = pd.Timedelta(hours=24)
 
 
-st.set_page_config(page_title="Trends × 台股事件研究", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Trends × Theme Research", page_icon="📈", layout="wide")
 
 
 @st.cache_resource
@@ -64,7 +78,9 @@ st.markdown(
 
 @st.cache_resource
 def database_engine():
-    return init_db(get_engine())
+    engine = init_db(get_engine())
+    sync_theme_mapping(engine)
+    return engine
 
 
 @st.cache_data(ttl=300)
@@ -117,6 +133,32 @@ def load_prices(stock_id: str | None = None) -> pd.DataFrame:
 @st.cache_data(ttl=300)
 def load_events() -> pd.DataFrame:
     return trends.event_study.build_event_frame(database_engine(), start_date=RESEARCH_START.date())
+
+
+@st.cache_data(ttl=300)
+def load_theme_history(theme_name: str) -> pd.DataFrame:
+    start_date = (pd.Timestamp.now().normalize() - pd.Timedelta(days=89)).date()
+    statement = (
+        select(GoogleTrendsHistory)
+        .where(
+            GoogleTrendsHistory.theme_name == theme_name,
+            GoogleTrendsHistory.trend_date >= start_date,
+        )
+        .order_by(GoogleTrendsHistory.trend_date)
+    )
+    with database_engine().connect() as connection:
+        return pd.read_sql(statement, connection)
+
+
+def load_theme_definitions() -> dict[str, dict[str, list[str]]]:
+    with database_engine().connect() as connection:
+        mapping = pd.read_sql(select(ThemeMapping), connection)
+    return build_theme_definitions(mapping)
+
+
+def load_theme_mapping_rows() -> pd.DataFrame:
+    with database_engine().connect() as connection:
+        return pd.read_sql(select(ThemeMapping), connection)
 
 
 def show_empty(message: str) -> None:
@@ -381,156 +423,224 @@ def page_dashboard() -> None:
         )
 
 
-def page_stock_events() -> None:
-    st.title("趨勢群組分析")
-    clusters = load_event_clusters()
-    if not clusters.empty:
-        clusters = clusters[clusters["stock_ids"].map(bool)].copy()
-    if clusters.empty:
-        show_empty("研究期間內尚無趨勢事件群組。")
+def page_theme_study() -> None:
+    st.title("主題研究")
+    st.caption("Theme Analysis · 主題熱度、關鍵字驅動、股票敏感度與新聞後報酬")
+    themes = load_theme_definitions()
+    if not themes:
+        show_empty("尚未設定主題映射，請確認 theme_mapping.csv。")
         return
 
-    prices = load_prices()
-    available_stock_ids = set(prices["stock_id"].astype(str)) if not prices.empty else set()
-    all_aligned_returns = trends.event_study.build_event_aligned_returns(
-        clusters,
-        prices,
-        start_date=RESEARCH_START_DATE,
+    theme_name = st.selectbox("研究主題", list(themes))
+    theme = themes[theme_name]
+    keywords = theme["keywords"]
+    stock_ids = theme["stock_ids"]
+    selected_keywords = st.multiselect(
+        "關鍵字篩選", keywords, default=keywords[:5], key=f"theme_keywords_{theme_name}"
     )
-    groups_with_day1 = set(
-        all_aligned_returns.loc[all_aligned_returns["day_offset"] == 1, "cluster_id"]
+    selected_stock_ids = st.multiselect(
+        "股票篩選", stock_ids, default=stock_ids, key=f"theme_stocks_{theme_name}"
     )
-    cluster_lookup = clusters.set_index("event_cluster_id", drop=False)
-    cluster_ids = clusters["event_cluster_id"].tolist()
-    default_index = next(
-        (
-            index for index, cluster in enumerate(clusters.itertuples(index=False))
-            if (
-                set(cluster.stock_ids or []).intersection(available_stock_ids)
-                and cluster.event_cluster_id in groups_with_day1
-            )
-        ),
-        0,
+    indicators = st.multiselect(
+        "技術指標",
+        ["MA5", "MA20", "MA60", "Volume", "RSI", "MACD"],
+        default=["MA5", "MA20", "MA60"],
+        key="theme_indicators",
     )
-    selected_cluster_id = st.selectbox(
-        "趨勢事件群組",
-        cluster_ids,
-        index=default_index,
-        format_func=lambda cluster_id: (
-            f"{cluster_id} · {cluster_lookup.loc[cluster_id, 'event_type']} · "
-            f"{cluster_lookup.loc[cluster_id, 'keyword']} · "
-            f"{pd.Timestamp(cluster_lookup.loc[cluster_id, 'first_seen']):%Y-%m-%d %H:%M}"
-        ),
+
+    history = load_theme_history(theme_name)
+    all_prices = load_prices()
+    prices = all_prices[all_prices["stock_id"].astype(str).isin(selected_stock_ids)].copy() if not all_prices.empty else all_prices
+    observations = load_trend_observations()
+    daily_heat = build_daily_theme_heat(history, selected_keywords)
+    news = build_theme_news_timeline(observations, selected_keywords)
+    relative_returns = build_relative_returns(prices, selected_stock_ids)
+    technical_frame = build_stock_technicals(prices, selected_stock_ids)
+    same_day = build_heat_price_correlations(daily_heat, prices, selected_stock_ids)
+    cross_correlations = build_cross_correlations(daily_heat, prices, selected_stock_ids, -10, 10)
+    mapping_rows = load_theme_mapping_rows()
+    coverage = build_theme_coverage(observations, mapping_rows)
+    unclassified = build_unclassified_keywords(observations, mapping_rows)
+    theme_counts = coverage[coverage["theme_name"] == theme_name]
+    event_count = int(theme_counts.iloc[0]["event_count"]) if not theme_counts.empty else 0
+    news_count = int(theme_counts.iloc[0]["news_count"]) if not theme_counts.empty else 0
+
+    latest_date = daily_heat["date"].max() if not daily_heat.empty else pd.NaT
+    if pd.notna(latest_date):
+        recent_start = latest_date - pd.Timedelta(days=6)
+        current_week = daily_heat[daily_heat["date"].between(recent_start, latest_date)]
+        previous_week = daily_heat[
+            daily_heat["date"].between(latest_date - pd.Timedelta(days=13), latest_date - pd.Timedelta(days=7))
+        ]
+        average_heat = current_week.groupby("date")["heat"].mean().mean()
+        popular_keywords = current_week.groupby("keyword")["heat"].mean().sort_values(ascending=False)
+        hot_keyword = popular_keywords.index[0] if not popular_keywords.empty else "N/A"
+        average_previous_heat = previous_week.groupby("date")["heat"].mean().mean()
+        heat_change = average_heat / average_previous_heat - 1 if pd.notna(average_previous_heat) and average_previous_heat > 0 else None
+    else:
+        current_week = pd.DataFrame(columns=["date", "keyword", "heat"])
+        previous_week = current_week
+        average_heat = float("nan")
+        hot_keyword = "N/A"
+        heat_change = None
+
+    sensitivity = same_day.dropna(subset=["pearson"]).copy()
+    if not sensitivity.empty:
+        stock_sensitivity = sensitivity.groupby("stock_id")["pearson"].apply(lambda values: values.abs().mean())
+        hot_stock_id = stock_sensitivity.idxmax()
+        hot_stock = f"{hot_stock_id} {get_stock_name(hot_stock_id)}"
+    else:
+        hot_stock = "樣本不足"
+    positive_mask = (
+        pd.to_numeric(cross_correlations["best_lag"], errors="coerce").gt(0)
+        & pd.to_numeric(cross_correlations["best_correlation"], errors="coerce").gt(0)
     )
-    selected_cluster = cluster_lookup.loc[selected_cluster_id]
-    stock_ids = selected_cluster["stock_ids"] or []
-    st.markdown(f"**{selected_cluster_id} · {selected_cluster['keyword']}**")
+    positive_lags = pd.to_numeric(cross_correlations.loc[positive_mask, "best_lag"], errors="coerce")
+    average_lead = f"+{positive_lags.mean():.1f} 天" if not positive_lags.empty else "尚無正向領先樣本"
+
     with st.container(horizontal=True):
-        st.metric("事件分類", selected_cluster["event_type"] or "未分類")
-        st.metric("首次熱搜", pd.Timestamp(selected_cluster["first_seen"]).strftime("%Y-%m-%d %H:%M"))
-        st.metric("最後熱搜", pd.Timestamp(selected_cluster["last_seen"]).strftime("%Y-%m-%d %H:%M"))
-        st.metric("持續時間", f"{selected_cluster['duration_hours']:.2f} 小時")
-        st.metric("觀測次數", f"{int(selected_cluster['occurrence_count']):,}")
-        st.metric("新聞數量", f"{int(selected_cluster['news_count']):,}")
-        st.metric("最高熱度", f"{selected_cluster['max_traffic']:,.0f}")
-    related_stocks = ", ".join(
-        f"{stock_id} {get_stock_name(stock_id)}" for stock_id in stock_ids
-    )
-    st.markdown(f"**相關股票群：** {related_stocks or '無配對股票'}")
+        st.metric("近 7 日平均熱度", f"{average_heat:.1f}" if pd.notna(average_heat) else "N/A", format_percent(heat_change))
+        st.metric("熱門關鍵字", hot_keyword)
+        st.metric("熱門股票", hot_stock)
+        st.metric("主題事件數", f"{event_count:,}")
+        st.metric("新聞數量", f"{news_count:,}")
+        st.metric("熱度平均領先", average_lead)
 
-    news = load_trend_observations()
-    news = news[news["trend_id"].isin(selected_cluster["trend_ids"])].copy()
-    news["news_key"] = news["news_url"].fillna("").astype(str).str.strip()
-    fallback_key = news["news_title"].fillna("").astype(str).str.strip() + "|" + news["news_source"].fillna("").astype(str).str.strip()
-    news["news_key"] = news["news_key"].where(news["news_key"].ne(""), fallback_key)
-    news = news[news["news_key"].str.strip("|").ne("")].drop_duplicates("news_key")
-    st.subheader("群組新聞")
-    if news.empty:
-        show_empty("此事件群組沒有可顯示的新聞項目。")
+    st.subheader("Google Trends 熱度")
+    st.caption("每個關鍵字的 Google Trends 分數各自正規化為 0–100，適合比較同一關鍵字的時間變化，不代表不同關鍵字的絕對搜尋量。")
+    if daily_heat.empty:
+        show_empty("尚無歷史熱度；執行 `python -m trends.trend_history_collector` 回補近 90 天資料。")
     else:
-        st.dataframe(
-            news[["news_title", "news_source", "news_url"]].rename(columns={
-                "news_title": "新聞標題", "news_source": "新聞來源", "news_url": "新聞連結",
-            }),
-            column_config={"新聞連結": st.column_config.LinkColumn(display_text="開啟")},
-            hide_index=True,
-        )
-
-    aligned_returns = all_aligned_returns[
-        all_aligned_returns["cluster_id"] == selected_cluster_id
-    ].copy()
-    comparison = trends.event_study.build_return_comparison(aligned_returns, selected_cluster_id)
-    st.subheader("事件後股票反應")
-    if comparison.empty:
-        show_empty("行情尚未涵蓋完整事件後交易日，暫無可比較的報酬。")
-    else:
-        comparison_display = comparison.copy()
-        comparison_display.insert(
-            1,
-            "股票名稱",
-            comparison_display["stock_id"].map(get_stock_name),
-        )
-        comparison_display = comparison_display.rename(columns={
-            "stock_id": "股票代號", "day1": "Day1", "day3": "Day3", "day5": "Day5", "day10": "Day10",
-        })
-        day1_leader = comparison.dropna(subset=["day1"]).head(1)
-        day10_leader = comparison.dropna(subset=["day10"]).sort_values("day10", ascending=False).head(1)
-        with st.container(horizontal=True):
-            st.metric(
-                "Day1 反應最快",
-                f"{day1_leader.iloc[0]['stock_id']} {get_stock_name(day1_leader.iloc[0]['stock_id'])}"
-                if not day1_leader.empty else "N/A",
-                format_percent(day1_leader.iloc[0]["day1"]) if not day1_leader.empty else None,
-            )
-            st.metric(
-                "Day10 報酬最高",
-                f"{day10_leader.iloc[0]['stock_id']} {get_stock_name(day10_leader.iloc[0]['stock_id'])}"
-                if not day10_leader.empty else "N/A",
-                format_percent(day10_leader.iloc[0]["day10"]) if not day10_leader.empty else None,
-            )
-        st.dataframe(
-            comparison_display,
-            column_config={
-                column: st.column_config.NumberColumn(format="percent")
-                for column in ("Day1", "Day3", "Day5", "Day10")
-            },
-            hide_index=True,
-        )
-
-    if aligned_returns.empty:
-        show_empty("這個事件群組目前沒有可對齊的研究期間行情。")
-    else:
-        return_figure = go.Figure()
-        for stock_id, stock_path in aligned_returns.groupby("stock_id", sort=False):
-            stock_path = stock_path.sort_values("day_offset")
-            return_figure.add_trace(go.Scatter(
-                x=stock_path["day_offset"],
-                y=stock_path["relative_return"],
-                mode="lines+markers",
-                name=f"{stock_id} {get_stock_name(stock_id)}",
-                customdata=stock_path["market_date"].astype(str),
-                hovertemplate="%{fullData.name}<br>Day%{x}<br>交易日：%{customdata}<br>相對報酬：%{y:.2%}<extra></extra>",
+        heat_figure = go.Figure()
+        for keyword, keyword_rows in daily_heat.groupby("keyword", sort=False):
+            heat_figure.add_trace(go.Scatter(
+                x=keyword_rows["date"], y=keyword_rows["heat"], mode="lines", name=keyword,
+                hovertemplate=f"{keyword}<br>%{{x|%Y-%m-%d}}<br>熱度：%{{y}}<extra></extra>",
             ))
-        return_figure.update_layout(
-            height=460,
-            xaxis={"title": "事件後交易日", "tickmode": "array", "tickvals": [0, 1, 3, 5, 10]},
-            yaxis={"title": "相對 Day0 報酬", "tickformat": ".1%", "zeroline": True},
-            hovermode="closest",
-            legend={"orientation": "h", "y": 1.08},
-        )
-        st.plotly_chart(return_figure, width="stretch")
+        theme_daily = daily_heat.groupby("date", as_index=False)["heat"].mean().rename(columns={"heat": "theme_heat"})
+        heat_figure.add_trace(go.Scatter(
+            x=theme_daily["date"], y=theme_daily["theme_heat"], mode="lines", name="主題平均熱度",
+            line={"width": 3, "color": "#20291f"},
+        ))
+        if not news.empty:
+            news_markers = news.merge(theme_daily, on="date", how="left")
+            news_markers["theme_heat"] = news_markers["theme_heat"].fillna(theme_daily["theme_heat"].max())
+            heat_figure.add_trace(go.Scatter(
+                x=news_markers["date"], y=news_markers["theme_heat"], mode="markers", name="RSS 新聞",
+                marker={"symbol": "diamond", "size": 10, "color": "#db795e"},
+                customdata=news_markers[["keyword", "news_title", "news_source"]],
+                hovertemplate="%{customdata[0]}<br>%{x|%Y-%m-%d}<br>%{customdata[1]}<br>來源：%{customdata[2]}<extra></extra>",
+            ))
+        heat_figure.update_layout(height=410, xaxis_title="日期", yaxis_title="每日熱度 0–100", hovermode="x unified", legend={"orientation": "h", "y": 1.12})
+        st.plotly_chart(heat_figure, width="stretch")
 
-        with st.expander("Event Alignment 明細"):
-            aligned_display = aligned_returns.rename(columns={
-                "cluster_id": "事件群組ID", "stock_id": "股票代號", "event_date": "事件日期",
-                "market_date": "交易日", "day_offset": "交易日偏移", "close": "收盤價",
-                "base_close": "Day0基準價", "relative_return": "相對報酬",
-            })
-            st.dataframe(
-                aligned_display,
-                column_config={"相對報酬": st.column_config.NumberColumn(format="percent")},
-                hide_index=True,
+    st.subheader("股票相對報酬與技術指標")
+    if relative_returns.empty:
+        show_empty("所選股票尚無可用日行情。")
+    else:
+        extra_rows = [indicator for indicator in ("Volume", "RSI", "MACD") if indicator in indicators]
+        subplot_titles = ["相對報酬（首日 = 100）", *extra_rows]
+        performance_figure = make_subplots(rows=len(subplot_titles), cols=1, shared_xaxes=True, vertical_spacing=0.08, subplot_titles=subplot_titles)
+        for stock_id, stock_path in technical_frame.groupby("stock_id", sort=False):
+            stock_path = stock_path.sort_values("date")
+            performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["base_100"], mode="lines", name=f"{stock_id} 股價"), row=1, col=1)
+            for indicator, column in (("MA5", "ma5"), ("MA20", "ma20"), ("MA60", "ma60")):
+                if indicator in indicators:
+                    performance_figure.add_trace(go.Scatter(
+                        x=stock_path["date"], y=stock_path[column], mode="lines", name=f"{stock_id} {indicator}",
+                        line={"dash": "dot"},
+                    ), row=1, col=1)
+        for row_number, indicator in enumerate(extra_rows, start=2):
+            for stock_id, stock_path in technical_frame.groupby("stock_id", sort=False):
+                stock_path = stock_path.sort_values("date")
+                if indicator == "Volume":
+                    performance_figure.add_trace(go.Bar(x=stock_path["date"], y=stock_path["volume"], name=f"{stock_id} Volume", opacity=0.55), row=row_number, col=1)
+                elif indicator == "RSI":
+                    performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["rsi"], mode="lines", name=f"{stock_id} RSI"), row=row_number, col=1)
+                else:
+                    performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["macd"], mode="lines", name=f"{stock_id} MACD"), row=row_number, col=1)
+                    performance_figure.add_trace(go.Scatter(x=stock_path["date"], y=stock_path["macd_signal"], mode="lines", name=f"{stock_id} MACD Signal", line={"dash": "dot"}), row=row_number, col=1)
+        performance_figure.update_layout(height=320 + 180 * len(extra_rows), hovermode="x unified", legend={"orientation": "h", "y": 1.08})
+        performance_figure.update_yaxes(title_text="Base = 100", row=1, col=1)
+        st.plotly_chart(performance_figure, width="stretch")
+
+    st.subheader("關鍵字與股票 Pearson Heatmap")
+    if same_day.empty:
+        show_empty("歷史熱度或股票日報酬不足，暫無法計算相關係數。")
+    else:
+        heatmap_values = same_day.pivot(index="stock_id", columns="keyword", values="pearson").reindex(
+            index=selected_stock_ids, columns=selected_keywords
+        )
+        heatmap = go.Figure(go.Heatmap(
+            z=heatmap_values.to_numpy(), x=heatmap_values.columns.tolist(),
+            y=[f"{stock_id} {get_stock_name(stock_id)}" for stock_id in heatmap_values.index],
+            zmin=-1, zmax=1, colorscale="RdYlGn", colorbar={"title": "Pearson"},
+            hovertemplate="股票：%{y}<br>關鍵字：%{x}<br>Pearson：%{z:.2f}<extra></extra>",
+        ))
+        heatmap.update_layout(height=max(320, 34 * len(selected_stock_ids)), xaxis_title="關鍵字", yaxis_title="股票")
+        st.plotly_chart(heatmap, width="stretch")
+
+    st.subheader("Lag Analysis · Cross Correlation")
+    st.caption("比較每日熱度與股票日報酬，掃描 Lag -10 到 +10 個交易日。正值表示關鍵字熱度領先股價報酬；負值表示股價先行。最佳相關依絕對值選取，每組至少 5 筆有效樣本。")
+    if cross_correlations.empty:
+        show_empty("所選關鍵字與股票沒有足夠的歷史資料可計算 Lag。")
+    else:
+        lag_display = same_day.merge(cross_correlations, on=["stock_id", "keyword"], how="outer")
+        lag_display.insert(0, "股票", lag_display["stock_id"].map(lambda stock_id: f"{stock_id} {get_stock_name(stock_id)}"))
+        lag_display["最佳 Lag"] = lag_display["best_lag"].map(
+            lambda value: f"{int(value):+d}" if pd.notna(value) else "N/A"
+        )
+        lag_display = lag_display.rename(columns={
+            "keyword": "關鍵字", "pearson": "Pearson", "best_correlation": "最佳相關",
+            "sample_count_y": "Lag 樣本數", "sample_count_x": "同日樣本數",
+        })
+        lag_display = lag_display[["股票", "關鍵字", "Pearson", "最佳 Lag", "最佳相關", "Lag 樣本數"]].sort_values(
+            "最佳相關", key=lambda values: values.abs(), ascending=False, na_position="last"
+        )
+        st.dataframe(lag_display, column_config={
+            column: st.column_config.NumberColumn(format="%.2f")
+            for column in ("Pearson", "最佳相關")
+        }, hide_index=True)
+        strongest = cross_correlations.dropna(subset=["best_lag", "best_correlation"]).sort_values(
+            "best_correlation", key=lambda values: values.abs(), ascending=False
+        ).head(1)
+        if not strongest.empty:
+            strongest_row = strongest.iloc[0]
+            lag = int(strongest_row["best_lag"])
+            stock_name = get_stock_name(strongest_row["stock_id"])
+            direction = "同向" if strongest_row["best_correlation"] > 0 else "反向"
+            lag_meaning = (
+                f"{strongest_row['keyword']} 熱度領先 {stock_name} {lag} 個交易日，兩者{direction}相關"
+                if lag > 0 else
+                f"{stock_name} 股價報酬領先 {strongest_row['keyword']} 熱度 {abs(lag)} 個交易日，兩者{direction}相關"
+                if lag < 0 else f"熱度與 {stock_name} 股價報酬以同日相關最高，兩者{direction}相關"
             )
+            st.caption(f"最佳組合解讀：{lag_meaning}，相關係數 {strongest_row['best_correlation']:.2f}。這是歷史相關，不代表因果或預測。")
+
+    st.subheader("新聞時間軸與新聞後進場空間")
+    if news.empty:
+        show_empty("此主題目前沒有匹配的 RSS 新聞。")
+    else:
+        post_news = build_post_news_returns(news, prices, selected_stock_ids)
+        news_display = news.merge(post_news, on=["date", "keyword", "news_title", "news_source"], how="left")
+        news_display = news_display.rename(columns={
+            "date": "日期", "keyword": "關鍵字", "news_title": "新聞標題", "news_source": "新聞來源",
+            "news_url": "新聞連結", "avg_future_return": "新聞後5日平均報酬", "stock_count": "有效股票數",
+        })
+        st.dataframe(news_display, column_config={
+            "新聞連結": st.column_config.LinkColumn(display_text="開啟"),
+            "新聞後5日平均報酬": st.column_config.NumberColumn(format="percent"),
+        }, hide_index=True)
+        st.caption("新聞後報酬以新聞日期之後的下一個交易日收盤作為觀察起點，計算其後 5 個交易日平均報酬；尚未走完觀察期的新聞會留白。")
+
+    st.subheader("主題覆蓋率")
+    coverage_display = coverage.rename(columns={"theme_name": "主題", "event_count": "RSS 事件數", "news_count": "新聞數量"})
+    st.dataframe(coverage_display, hide_index=True)
+    st.subheader("未分類關鍵字 TOP 100")
+    if unclassified.empty:
+        show_empty("目前沒有未分類的 RSS 關鍵字。")
+    else:
+        st.dataframe(unclassified.rename(columns={"keyword": "關鍵字", "event_count": "出現次數"}), hide_index=True)
 
 
 def page_observation() -> None:
@@ -574,14 +684,14 @@ def page_observation() -> None:
 
 PAGES = {
     "市場總覽": page_dashboard,
-    "趨勢群組分析": page_stock_events,
+    "主題研究": page_theme_study,
     "還來得及上車嗎？": page_observation,
 }
 
 
 with st.sidebar:
-    st.title("TRENDS / EQUITY")
-    selected_page = st.radio("研究頁面", list(PAGES), label_visibility="collapsed")
+    st.title("TRENDS / THEME")
+    selected_page = st.radio("研究頁面", list(PAGES), index=1, label_visibility="collapsed")
     st.divider()
     if st.button("更新股價", icon=":material/sync:", width="stretch"):
         with st.spinner("下載最近行情…"):

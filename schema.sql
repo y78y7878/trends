@@ -47,6 +47,26 @@ CREATE TABLE IF NOT EXISTS event_analysis (
     UNIQUE (trend_id, news_id, stock_id)
 );
 
+CREATE TABLE IF NOT EXISTS theme_mapping (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    theme_name TEXT NOT NULL,
+    keyword TEXT NOT NULL,
+    stock_id TEXT,
+    category TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (theme_name, keyword, stock_id, category)
+);
+
+CREATE TABLE IF NOT EXISTS google_trends_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL,
+    theme_name TEXT NOT NULL,
+    trend_date DATE NOT NULL,
+    trend_score INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (keyword, theme_name, trend_date)
+);
+
 CREATE INDEX IF NOT EXISTS idx_google_trends_keyword ON google_trends(keyword);
 CREATE INDEX IF NOT EXISTS idx_google_trends_published_at ON google_trends(published_at);
 CREATE INDEX IF NOT EXISTS idx_event_analysis_date_stock ON event_analysis(event_date, stock_id);

@@ -12,9 +12,10 @@ from sqlalchemy.engine import Engine
 
 from trends.database import Stock, get_engine, init_db
 from trends.keyword_mapping import get_stock_pool
+from trends.theme_study import load_theme_mapping
 
 
-DEFAULT_STOCKS = get_stock_pool()
+DEFAULT_STOCKS = sorted(set(get_stock_pool()) | set(load_theme_mapping()["stock_id"]))
 
 
 def to_yfinance_ticker(stock_id: str) -> str:
@@ -36,6 +37,8 @@ def download_prices(stock_id: str, start: date | None = None) -> pd.DataFrame:
         options["end"] = (date.today() + timedelta(days=1)).isoformat()
 
     history = yf.Ticker(ticker).history(**options)
+    if history.empty and stock_id.strip().isdigit():
+        history = yf.Ticker(f"{stock_id.strip()}.TWO").history(**options)
     if history.empty:
         return pd.DataFrame(columns=["date", "stock_id", "open", "high", "low", "close", "adj_close", "volume"])
 

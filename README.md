@@ -142,6 +142,24 @@ pip install transformers torch
 
 若需重新建立／檢查 schema，使用 `schema.sql`；程式的 `init_db()` 會自動建立資料表並遷移舊新聞表。資料欄位及索引定義以 [schema.sql](schema.sql) 為準。
 
+### 主題研究與歷史熱度
+
+第二頁「主題研究」以 `theme_mapping.csv` 定義主題、關鍵字、股票與分類。第一次啟動時會依內建分類自動產生 CSV，並同步到 `theme_mapping`；若要調整映射，編輯 CSV 後重啟 app。Event Cluster 和 RSS 表仍保留為即時事件偵測及新聞時間軸資料來源。
+
+`google_trends_history` 儲存 pytrends 收集的每日 0–100 熱度分數，供 Pearson heatmap 與 -10 至 +10 交易日 Cross Correlation 使用。首次回補及手動單次更新：
+
+```powershell
+python -m trends.trend_history_collector
+```
+
+持續排程會先回補一次，再於台北時間每日 19:00 更新：
+
+```powershell
+python -m trends.trend_history_collector --schedule
+```
+
+每日關鍵字數較多時，回補可能需要數分鐘；Google Trends 可能限流，Collector 會記錄失敗關鍵字並繼續處理其餘項目。正 Lag 表示關鍵字熱度先於股票日報酬，負 Lag 表示股價報酬先行。新聞後 5 日報酬以新聞日期之後的下一個交易日收盤作為觀察起點。
+
 ### 事件研究定義
 
 RSS 的 `published_at` 作為事件日期；若當天不是交易日，會對齊至下一個有行情的交易日。前 1/3/5/10 日報酬用事件日收盤價相對過去收盤價計算；事件後報酬從對齊後的事件日收盤價起算。研究摘要回報各持有期間的平均報酬、勝率、最大漲幅與最大跌幅。Alpha 分數是熱度、成交量變化、新聞情緒與「只使用較早事件」計算的歷史勝率之加權排序，不是投資建議或預測保證。

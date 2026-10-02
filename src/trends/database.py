@@ -71,6 +71,30 @@ class EventAnalysis(Base):
     future_return_10d: Mapped[float | None] = mapped_column(Float)
 
 
+class ThemeMapping(Base):
+    __tablename__ = "theme_mapping"
+    __table_args__ = (UniqueConstraint("theme_name", "keyword", "stock_id", "category"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    theme_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    stock_id: Mapped[str | None] = mapped_column(String(16), index=True)
+    category: Mapped[str | None] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class GoogleTrendsHistory(Base):
+    __tablename__ = "google_trends_history"
+    __table_args__ = (UniqueConstraint("keyword", "theme_name", "trend_date"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    theme_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    trend_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    trend_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
 def get_engine(db_path: str | Path = DB_PATH) -> Engine:
     path = Path(db_path).resolve()
     engine = create_engine(f"sqlite:///{path.as_posix()}", connect_args={"check_same_thread": False})
