@@ -20,6 +20,7 @@ from trends.database import (
     get_engine,
     init_db,
 )
+from trends.keyword_auto_classification import auto_classify_unclassified_keywords
 from trends.keyword_classification import classify_pending_keywords, classify_pending_news
 from trends.theme_study import sync_theme_mapping
 
@@ -106,6 +107,11 @@ def run_daily_etl(
     db_engine = init_db(engine or get_engine())
     mapping_rows = sync_theme_mapping(db_engine)
     keyword_rows = classify_pending_keywords(db_engine, limit=keyword_limit)
+    quality_rows = 0
+    try:
+        quality_rows = auto_classify_unclassified_keywords(db_engine, limit=100)
+    except RuntimeError as error:
+        print(f"Auto keyword classification skipped: {error}")
     from trends.trend_history_collector import collect_trend_history
 
     history_rows = collect_trend_history(db_engine, days=history_days, classify_keywords=False)
@@ -118,6 +124,7 @@ def run_daily_etl(
     return {
         "mapping_rows": mapping_rows,
         "classified_keywords": keyword_rows,
+        "quality_classified_keywords": quality_rows,
         "history_rows": history_rows,
         "classified_news": news_rows,
         "daily_stat_themes": stats_rows,

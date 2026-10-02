@@ -69,7 +69,22 @@ CREATE TABLE IF NOT EXISTS keyword_classification (
     stock_related INTEGER NOT NULL DEFAULT 0,
     confidence_score REAL NOT NULL DEFAULT 0,
     classification_source TEXT NOT NULL,
+    need_review INTEGER NOT NULL DEFAULT 0,
+    reviewed_at DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS classification_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT NOT NULL,
+    canonical_keyword TEXT,
+    theme_name TEXT,
+    sub_theme TEXT,
+    stock_related INTEGER NOT NULL DEFAULT 0,
+    confidence_score REAL NOT NULL DEFAULT 0,
+    classification_result TEXT,
+    need_review INTEGER NOT NULL DEFAULT 0,
+    classified_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS google_trends_history (

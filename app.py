@@ -23,6 +23,7 @@ from trends.database import (
     get_engine,
     init_db,
 )
+from trends.keyword_auto_classification import build_keyword_quality_summary
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
 from trends.keyword_classification import classify_pending_keywords, classify_pending_news
 from trends.sentiment import analyze_pending_news
@@ -183,6 +184,11 @@ def load_theme_daily_stats() -> pd.DataFrame:
     )
     with database_engine().connect() as connection:
         return pd.read_sql(statement, connection)
+
+
+@st.cache_data(ttl=300)
+def load_keyword_quality_summary() -> dict[str, float | int]:
+    return build_keyword_quality_summary(database_engine())
 
 
 def show_empty(message: str) -> None:
@@ -414,6 +420,7 @@ def build_observation_ranking(events: pd.DataFrame) -> pd.DataFrame:
 def page_dashboard() -> None:
     st.title("市場總覽")
     st.caption("事件驅動投資研究平台")
+    quality_summary = load_keyword_quality_summary()
     trends = load_trends()
     clusters = load_event_clusters()
     prices = load_prices()
@@ -422,6 +429,11 @@ def page_dashboard() -> None:
     first_seen = pd.to_datetime(matched_clusters["first_seen"], errors="coerce") if not matched_clusters.empty else pd.Series(dtype="datetime64[ns]")
     new_events = int(first_seen.dt.normalize().eq(today).sum()) if not first_seen.empty else 0
     covered_stock_ids = matched_clusters["stock_ids"].explode().dropna().unique() if not matched_clusters.empty else []
+    with st.container(horizontal=True):
+        st.metric("總關鍵字數", f"{quality_summary.get('total_keywords', 0):,}")
+        st.metric("已分類數", f"{quality_summary.get('classified_keywords', 0):,}")
+        st.metric("未分類數", f"{quality_summary.get('unclassified_keywords', 0):,}")
+        st.metric("分類覆蓋率", f"{quality_summary.get('coverage_rate', 0):.1%}")
     with st.container(horizontal=True):
         st.metric("追蹤關鍵字數", f"{trends['keyword'].nunique():,}" if not trends.empty else "0")
         st.metric("已配對事件數", f"{len(matched_clusters):,}")

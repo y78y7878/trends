@@ -97,7 +97,24 @@ class KeywordClassification(Base):
     stock_related: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     confidence_score: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
     classification_source: Mapped[str] = mapped_column(String(30), nullable=False)
+    need_review: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class ClassificationLog(Base):
+    __tablename__ = "classification_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    canonical_keyword: Mapped[str | None] = mapped_column(String(255))
+    theme_name: Mapped[str | None] = mapped_column(String(100), index=True)
+    sub_theme: Mapped[str | None] = mapped_column(String(100))
+    stock_related: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+    classification_result: Mapped[str | None] = mapped_column(String(500))
+    need_review: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    classified_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
 
 class GoogleTrendsHistory(Base):
@@ -151,6 +168,10 @@ def init_db(engine: Engine | None = None) -> Engine:
         "theme_mapping": {
             "sub_theme": "VARCHAR(100)",
             "active": "INTEGER NOT NULL DEFAULT 1",
+        },
+        "keyword_classification": {
+            "need_review": "INTEGER NOT NULL DEFAULT 0",
+            "reviewed_at": "DATETIME",
         },
     }
     with db_engine.begin() as connection:
