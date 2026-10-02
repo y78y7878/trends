@@ -11,9 +11,10 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.database import Stock, get_engine, init_db
+from trends.keyword_mapping import get_stock_pool
 
 
-DEFAULT_STOCKS = ["2330", "2454", "2317", "2305", "NVDA", "TSLA"]
+DEFAULT_STOCKS = get_stock_pool()
 
 
 def to_yfinance_ticker(stock_id: str) -> str:

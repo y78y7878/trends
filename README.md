@@ -107,15 +107,15 @@ python dcard_trends.py
 ### 專案結構
 
 ```text
-app.py                         Streamlit 五頁 Dashboard
+app.py                         Streamlit 研究 Dashboard
 schema.sql                     SQLite 完整 CREATE TABLE 範例
-keyword_mapping.csv            關鍵字與股票代號對應表
+keyword_theme_mapping.csv      company/industry/theme 多股票對應表
 src/trends/database.py         SQLAlchemy models、SQLite 初始化與相容遷移
 src/trends/stock_collector.py  yfinance 歷史回補、增量更新與每日排程
 src/trends/features.py         前/後 1、3、5、10 日報酬及成交量變化
-src/trends/keyword_mapping.py  RapidFuzz 模糊配對
+src/trends/keyword_mapping.py  RapidFuzz 事件分類與多股票配對
 src/trends/sentiment.py        Transformers 多語新聞情緒分類
-src/trends/event_study.py      事件對齊、資料持久化與事件統計
+src/trends/event_study.py      多股票事件對齊、資料持久化與事件統計
 src/trends/alpha_signal.py     Alpha Signal 分數與狀態標籤
 ```
 
@@ -126,13 +126,13 @@ pip install -e .
 streamlit run app.py
 ```
 
-首次行情更新會回補最多五年資料，後續只更新最近區間並重算有修訂的日期。也可在 Windows 工作排程器中執行每日收集器：
+首次行情更新會回補最多五年資料，後續只更新最近區間並重算有修訂的日期。平台分析與圖表只使用 2026-08-21 起的研究期間。也可在 Windows 工作排程器中執行每日收集器：
 
 ```powershell
 python -m trends.stock_collector --schedule
 ```
 
-不帶 `--schedule` 則立即抓取一次。預設追蹤 2330、2454、2317、2305、NVDA、TSLA；台股代號會轉為 yfinance 的 `.TW` 格式。可修改 `DEFAULT_STOCKS` 和 `keyword_mapping.csv`。
+不帶 `--schedule` 則立即抓取一次。預設股票池由 `keyword_theme_mapping.csv` 去重產生，涵蓋約 48 檔台股 ETF、產業代表股及美股；台股代號會轉為 yfinance 的 `.TW` 格式。映射欄位為 `keyword,type,stock_id`，其中 `type` 為 `company`、`industry` 或 `theme`，同一 keyword 可有多筆股票。
 
 新聞情緒模型採用多語 Transformers 模型，第一次分析需要下載模型。安裝可選依賴後，在「新聞事件分析」頁按下分類按鈕：
 
