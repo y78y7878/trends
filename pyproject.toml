@@ -20,6 +20,7 @@ dependencies = [
     "pandas>=3.0.5",
     "playwright>=1.62.0",
     "pyarrow>=25.0.1",
+    "plotly>=6.0.0",
     "pymysql>=1.2.0",
     "python-dateutil>=2.9.0.post0",
     "python-dotenv>=1.2.3",
@@ -27,7 +28,9 @@ dependencies = [
     "schedule>=1.2.2",
     "snowflake-connector-python>=4.7.3",
     "snowflake-snowpark-python>=1.54.0",
+    "rapidfuzz>=3.10.0",
     "sqlalchemy>=2.1.1",
+    "streamlit>=1.40.0",
     "yfinance>=1.7.0",
 ]
 

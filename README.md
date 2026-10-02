@@ -99,3 +99,49 @@ python dcard_trends.py
 
 ## 📜 免責聲明 (Disclaimer)
 本專案僅供程式語言學習與技術研究之用。請遵守各平台的服務條款（Terms of Service），切勿將此工具用於惡意攻擊、高頻率壓測或商業營利用途。
+
+## Google Trends 與台股事件驅動分析平台
+
+此平台沿用根目錄的 `data.db` 與既有 `google_trends`、`google_trends_news` RSS 資料表。啟動時會建立行情/事件表，並為舊版新聞表補上 `news_sentiment` 欄位。
+
+### 專案結構
+
+```text
+app.py                         Streamlit 五頁 Dashboard
+schema.sql                     SQLite 完整 CREATE TABLE 範例
+keyword_mapping.csv            關鍵字與股票代號對應表
+src/trends/database.py         SQLAlchemy models、SQLite 初始化與相容遷移
+src/trends/stock_collector.py  yfinance 歷史回補、增量更新與每日排程
+src/trends/features.py         前/後 1、3、5、10 日報酬及成交量變化
+src/trends/keyword_mapping.py  RapidFuzz 模糊配對
+src/trends/sentiment.py        Transformers 多語新聞情緒分類
+src/trends/event_study.py      事件對齊、資料持久化與事件統計
+src/trends/alpha_signal.py     Alpha Signal 分數與狀態標籤
+```
+
+### 安裝與執行
+
+```powershell
+pip install -e .
+streamlit run app.py
+```
+
+首次行情更新會回補最多五年資料，後續只更新最近區間並重算有修訂的日期。也可在 Windows 工作排程器中執行每日收集器：
+
+```powershell
+python -m trends.stock_collector --schedule
+```
+
+不帶 `--schedule` 則立即抓取一次。預設追蹤 2330、2454、2317、2305、NVDA、TSLA；台股代號會轉為 yfinance 的 `.TW` 格式。可修改 `DEFAULT_STOCKS` 和 `keyword_mapping.csv`。
+
+新聞情緒模型採用多語 Transformers 模型，第一次分析需要下載模型。安裝可選依賴後，在「新聞事件分析」頁按下分類按鈕：
+
+```powershell
+pip install transformers torch
+```
+
+若需重新建立／檢查 schema，使用 `schema.sql`；程式的 `init_db()` 會自動建立資料表並遷移舊新聞表。資料欄位及索引定義以 [schema.sql](schema.sql) 為準。
+
+### 事件研究定義
+
+RSS 的 `published_at` 作為事件日期；若當天不是交易日，會對齊至下一個有行情的交易日。前 1/3/5/10 日報酬用事件日收盤價相對過去收盤價計算；事件後報酬從對齊後的事件日收盤價起算。研究摘要回報各持有期間的平均報酬、勝率、最大漲幅與最大跌幅。Alpha 分數是熱度、成交量變化、新聞情緒與「只使用較早事件」計算的歷史勝率之加權排序，不是投資建議或預測保證。
