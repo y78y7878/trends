@@ -6,11 +6,12 @@ import re
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import select, update
+from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.alpha_signal import parse_traffic
-from trends.database import ThemeMapping, init_db
+from trends.database import GoogleTrendsHistory, KeywordClassification, ThemeMapping, init_db
 
 
 DEFAULT_THEME_MAPPING_PATH = Path(__file__).resolve().parents[2] / "theme_mapping.csv"
@@ -18,55 +19,120 @@ THEME_DEFINITIONS = {
     "科技類": {
         "keywords": ["AI", "ChatGPT", "OpenAI", "Gemini", "Copilot", "NVIDIA", "輝達", "CoWoS", "HBM", "ASIC", "DRAM", "半導體", "伺服器", "雲端", "資料中心", "聯發科", "台積電"],
         "stock_ids": ["2330", "2454", "2308", "2382", "3231", "6669", "3017", "3324", "3443", "3661", "6533", "NVDA"],
+        "subthemes": {"AI": ["AI", "ChatGPT", "OpenAI", "Gemini", "Copilot", "NVIDIA", "輝達"], "半導體": ["CoWoS", "HBM", "ASIC", "DRAM", "半導體", "台積電", "聯發科"], "雲端與資料中心": ["伺服器", "雲端", "資料中心"]},
     },
     "生技醫療類": {
         "keywords": ["疫苗", "癌症", "醫療", "生技", "FDA", "藥證", "基因", "精準醫療"],
         "stock_ids": ["4147", "4128", "6589", "6547", "1795"],
+        "subthemes": {"生技醫療": ["疫苗", "癌症", "醫療", "生技", "FDA", "藥證", "基因", "精準醫療"]},
     },
     "遊戲娛樂類": {
         "keywords": ["Steam", "Switch", "Switch2", "PS5", "Xbox", "寶可夢", "原神", "RO", "黑神話", "英雄聯盟", "電競"],
         "stock_ids": ["5478", "3083", "6180", "3546", "3086"],
+        "subthemes": {"PC遊戲": ["Steam", "RO"], "主機遊戲": ["Switch", "Switch2", "PS5", "Xbox"], "手遊與電競": ["寶可夢", "原神", "黑神話", "英雄聯盟", "電競"]},
     },
     "食品與消費類": {
         "keywords": ["超商", "統一發票", "飲料", "泡麵", "零食", "咖啡", "餐飲"],
         "stock_ids": ["1216", "1210", "2912", "2727"],
+        "subthemes": {"食品與餐飲": ["統一發票", "泡麵", "零食", "餐飲"], "飲料與零售": ["超商", "飲料", "咖啡"]},
     },
     "金融類": {
         "keywords": ["ETF", "0050", "0056", "00919", "00878", "降息", "升息", "Fed", "聯準會", "利率", "本益比", "美債"],
         "stock_ids": ["2881", "2882", "2891", "2886", "0050", "0056", "00878", "00919"],
+        "subthemes": {"ETF與退休金": ["ETF", "0050", "0056", "00919", "00878"], "利率與債券": ["降息", "升息", "Fed", "聯準會", "利率", "美債"], "銀行與估值": ["本益比"]},
     },
-    "能源與原物料": {
+    "能源與原物料類": {
         "keywords": ["原油", "天然氣", "石化", "鋼鐵", "銅價", "煤"],
         "stock_ids": ["2002", "1301", "1303", "6505"],
+        "subthemes": {"能源": ["原油", "天然氣", "煤"], "原物料": ["石化", "鋼鐵", "銅價"]},
     },
     "電商與零售": {
         "keywords": ["蝦皮", "PChome", "momo", "物流", "電商", "網購"],
         "stock_ids": ["8044", "8454", "5903"],
+        "subthemes": {"電商": ["蝦皮", "PChome", "momo", "電商", "網購"], "物流與零售": ["物流"]},
     },
     "綠能環保": {
         "keywords": ["太陽能", "風電", "綠能", "ESG", "電動車", "充電樁"],
         "stock_ids": ["2308", "1536", "2233", "1519"],
+        "subthemes": {"再生能源": ["太陽能", "風電", "綠能"], "ESG與電動車": ["ESG", "電動車", "充電樁"]},
     },
 }
-THEME_MAPPING_COLUMNS = ("theme_name", "keyword", "stock_id", "category")
+THEME_MAPPING_COLUMNS = ("theme_name", "sub_theme", "keyword", "stock_id", "active", "category")
+THEME_ALIASES = {
+    "能源與原物料": "能源與原物料類",
+    "電商與零售": "電商與零售類",
+    "綠能環保": "綠能環保類",
+}
+
+
+def normalize_theme_name(value: object) -> str:
+    compact = re.sub(r"\s+", "", str(value))
+    aliases = {re.sub(r"\s+", "", old): new for old, new in THEME_ALIASES.items()}
+    return aliases.get(compact, compact)
+
+
+THEME_DEFINITIONS = {
+    normalize_theme_name(theme_name): definition
+    for theme_name, definition in THEME_DEFINITIONS.items()
+}
+
+
+def _subtheme_for(theme_name: str, keyword: str) -> str:
+    for sub_theme, keywords in THEME_DEFINITIONS.get(theme_name, {}).get("subthemes", {}).items():
+        if keyword in keywords:
+            return sub_theme
+    return "其他"
 
 
 def ensure_theme_mapping_csv(path: str | Path = DEFAULT_THEME_MAPPING_PATH) -> Path:
     mapping_path = Path(path)
     if mapping_path.exists():
-        return mapping_path
-    mapping_path.parent.mkdir(parents=True, exist_ok=True)
-    with mapping_path.open("w", encoding="utf-8-sig", newline="") as file:
+        with mapping_path.open(encoding="utf-8-sig", newline="") as file:
+            existing_rows = list(csv.DictReader(file))
+        if (
+            all(column in (existing_rows[0] if existing_rows else {}) for column in THEME_MAPPING_COLUMNS)
+            and all(
+                row.get("theme_name", "") == normalize_theme_name(row.get("theme_name", ""))
+                and row.get("category", "") == normalize_theme_name(row.get("category", ""))
+                for row in existing_rows
+            )
+        ):
+            return mapping_path
+        rows = []
+        for row in existing_rows:
+            theme_name = normalize_theme_name(row.get("theme_name", ""))
+            keyword = row.get("keyword", "").strip()
+            row.update({
+                "theme_name": theme_name,
+                "sub_theme": row.get("sub_theme") or _subtheme_for(theme_name, keyword),
+                "active": row.get("active") or "1",
+                "category": normalize_theme_name(row.get("category") or theme_name),
+            })
+            rows.append(row)
+    else:
+        mapping_path.parent.mkdir(parents=True, exist_ok=True)
+        rows = []
+        for theme_name, definition in THEME_DEFINITIONS.items():
+            subthemes = {
+                keyword: sub_theme
+                for sub_theme, keywords in definition["subthemes"].items()
+                for keyword in keywords
+            }
+            for keyword, stock_id in itertools.product(definition["keywords"], definition["stock_ids"]):
+                rows.append({
+                    "theme_name": theme_name,
+                    "sub_theme": subthemes.get(keyword, "其他"),
+                    "keyword": keyword,
+                    "stock_id": stock_id,
+                    "active": "1",
+                    "category": theme_name,
+                })
+    temporary_path = mapping_path.with_suffix(f"{mapping_path.suffix}.tmp")
+    with temporary_path.open("w", encoding="utf-8-sig", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=THEME_MAPPING_COLUMNS)
         writer.writeheader()
-        for theme_name, definition in THEME_DEFINITIONS.items():
-            rows = itertools.product(definition["keywords"], definition["stock_ids"])
-            writer.writerows({
-                "theme_name": theme_name,
-                "keyword": keyword,
-                "stock_id": stock_id,
-                "category": theme_name,
-            } for keyword, stock_id in rows)
+        writer.writerows(rows)
+    temporary_path.replace(mapping_path)
     return mapping_path
 
 
@@ -77,6 +143,14 @@ def load_theme_mapping(path: str | Path = DEFAULT_THEME_MAPPING_PATH) -> pd.Data
         if column not in frame:
             frame[column] = ""
     frame = frame[list(THEME_MAPPING_COLUMNS)].apply(lambda column: column.str.strip())
+    frame["theme_name"] = frame["theme_name"].map(normalize_theme_name)
+    frame["sub_theme"] = frame.apply(
+        lambda row: row["sub_theme"] or _subtheme_for(row["theme_name"], row["keyword"]), axis=1
+    )
+    frame["active"] = frame["active"].replace("", "1")
+    frame["category"] = frame["category"].map(
+        lambda value: normalize_theme_name(value) if value else ""
+    ).where(frame["category"].ne(""), frame["theme_name"])
     return frame[frame["theme_name"].ne("") & frame["keyword"].ne("")].drop_duplicates().reset_index(drop=True)
 
 
@@ -85,9 +159,20 @@ def sync_theme_mapping(engine: Engine, path: str | Path = DEFAULT_THEME_MAPPING_
     frame = load_theme_mapping(path)
     rows = frame.where(frame.ne(""), None).to_dict(orient="records")
     with db_engine.begin() as connection:
-        connection.execute(delete(ThemeMapping))
+        for table in (ThemeMapping, KeywordClassification, GoogleTrendsHistory):
+            existing_names = connection.execute(select(table.theme_name).distinct()).scalars().all()
+            for existing_name in existing_names:
+                canonical_name = normalize_theme_name(existing_name)
+                if canonical_name != existing_name:
+                    values = {"theme_name": canonical_name}
+                    if table is ThemeMapping:
+                        values["category"] = canonical_name
+                    connection.execute(update(table).where(
+                        table.theme_name == existing_name
+                    ).values(**values))
         if rows:
-            connection.execute(ThemeMapping.__table__.insert(), rows)
+            statement = insert(ThemeMapping.__table__).values(rows).on_conflict_do_nothing()
+            connection.execute(statement)
     return len(rows)
 
 
@@ -97,10 +182,14 @@ def build_theme_definitions(
 ) -> dict[str, dict[str, list[str]]]:
     themes: dict[str, dict[str, list[str]]] = {}
     if not theme_mapping.empty:
+        if "active" in theme_mapping:
+            theme_mapping = theme_mapping[theme_mapping["active"].astype(str).isin(("1", "True", "true"))]
         for theme_name, rows in theme_mapping.groupby("theme_name", sort=False):
-            themes[str(theme_name)] = {
+            themes[normalize_theme_name(theme_name)] = {
                 "keywords": list(dict.fromkeys(rows["keyword"].astype(str))),
-                "stock_ids": list(dict.fromkeys(rows["stock_id"].dropna().astype(str))),
+                "stock_ids": list(dict.fromkeys(
+                    rows.loc[rows["stock_id"].notna() & rows["stock_id"].astype(str).ne(""), "stock_id"].astype(str)
+                )),
             }
     if keyword_mapping is not None and not keyword_mapping.empty:
         legacy_themes = keyword_mapping[keyword_mapping["type"] == "theme"]
@@ -290,15 +379,20 @@ def build_theme_coverage(observations: pd.DataFrame, theme_mapping: pd.DataFrame
     counts = pd.DataFrame(columns=columns)
     if not observations.empty:
         trends = observations[[column for column in ("trend_id", "news_id", "keyword") if column in observations]].copy()
-        lookup = theme_mapping[["theme_name", "keyword"]].drop_duplicates().copy()
-        keyword_lookup: dict[str, list[tuple[str, str]]] = {}
-        for row in lookup.itertuples(index=False):
-            keyword_lookup.setdefault(_normalize_keyword(row.keyword), []).append((row.theme_name, row.keyword))
-        trends["normalized_keyword"] = trends["keyword"].map(_normalize_keyword)
-        trends["theme_pairs"] = trends["normalized_keyword"].map(lambda value: keyword_lookup.get(value, []))
-        trends = trends.explode("theme_pairs").dropna(subset=["theme_pairs"])
+        if "classification_theme" in observations:
+            trends["theme_name"] = observations["classification_theme"]
+            trends = trends.dropna(subset=["theme_name"])
+        else:
+            lookup = theme_mapping[["theme_name", "keyword"]].drop_duplicates().copy()
+            keyword_lookup: dict[str, list[tuple[str, str]]] = {}
+            for row in lookup.itertuples(index=False):
+                keyword_lookup.setdefault(_normalize_keyword(row.keyword), []).append((row.theme_name, row.keyword))
+            trends["normalized_keyword"] = trends["keyword"].map(_normalize_keyword)
+            trends["theme_pairs"] = trends["normalized_keyword"].map(lambda value: keyword_lookup.get(value, []))
+            trends = trends.explode("theme_pairs").dropna(subset=["theme_pairs"])
+            if not trends.empty:
+                trends["theme_name"] = trends["theme_pairs"].map(lambda pair: pair[0])
         if not trends.empty:
-            trends[["theme_name", "mapped_keyword"]] = pd.DataFrame(trends["theme_pairs"].tolist(), index=trends.index)
             counts = trends.groupby("theme_name", as_index=False).agg(
                 event_count=("trend_id", "nunique"), news_count=("news_id", "nunique")
             )
@@ -310,6 +404,14 @@ def build_unclassified_keywords(observations: pd.DataFrame, theme_mapping: pd.Da
     columns = ["keyword", "event_count"]
     if observations.empty or "keyword" not in observations:
         return pd.DataFrame(columns=columns)
+    if "classification_theme" in observations:
+        frame = observations.loc[
+            observations["classification_theme"].isna() | observations["classification_theme"].eq("其他"),
+            [column for column in ("trend_id", "keyword") if column in observations],
+        ].dropna(subset=["keyword"])
+        return frame.drop_duplicates(["trend_id", "keyword"]).groupby("keyword", as_index=False).agg(
+            event_count=("trend_id", "nunique")
+        ).sort_values("event_count", ascending=False).head(limit).reset_index(drop=True)
     mapped = {_normalize_keyword(value) for value in theme_mapping.get("keyword", pd.Series(dtype=str))}
     frame = observations[[column for column in ("trend_id", "keyword") if column in observations]].dropna(subset=["keyword"])
     frame["normalized_keyword"] = frame["keyword"].map(_normalize_keyword)
@@ -367,12 +469,13 @@ def build_theme_news_timeline(observations: pd.DataFrame, keywords: list[str]) -
         return pd.DataFrame(columns=columns)
 
     frame = observations.copy()
+    source_keyword = "canonical_keyword" if "canonical_keyword" in frame else "keyword"
     frame["date"] = pd.to_datetime(frame["published_at"], errors="coerce")
     fetched_at = pd.to_datetime(frame["fetched_at"], errors="coerce")
     frame["date"] = frame["date"].fillna(fetched_at)
     frame["date"] = frame["date"].dt.normalize()
     keyword_lookup = _keyword_lookup(keywords)
-    frame["keyword"] = frame["keyword"].map(
+    frame["keyword"] = frame[source_keyword].fillna(frame["keyword"]).map(
         lambda value: keyword_lookup.get(_normalize_keyword(value))
     )
     frame = frame.dropna(subset=["date", "keyword"])

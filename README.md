@@ -117,6 +117,9 @@ src/trends/keyword_mapping.py  RapidFuzz 事件分類與多股票配對
 src/trends/sentiment.py        Transformers 多語新聞情緒分類
 src/trends/event_study.py      多股票事件對齊、資料持久化與事件統計
 src/trends/alpha_signal.py     Alpha Signal 分數與狀態標籤
+src/trends/keyword_classification.py Gemini 關鍵字正規化、主題分類及新聞事件/情緒標註
+src/trends/etl.py              Clean、Theme、History、Analytics 層可重跑 ETL
+src/trends/trend_history_collector.py pytrends 近 90 日歷史熱度收集器
 ```
 
 ### 安裝與執行
@@ -157,6 +160,24 @@ python -m trends.trend_history_collector
 ```powershell
 python -m trends.trend_history_collector --schedule
 ```
+
+### Warehouse ETL
+
+原始 `google_trends`、`google_trends_news`、`stocks`、`event_analysis` 資料不會被分類流程更新或刪除。`keyword_classification` 以原始 keyword 為主鍵，保存 AI canonical keyword、主題/次分類、股票關聯與信心分數；AI 結果會寫入 `theme_mapping`，歷史分數、新聞 enrichment 與 `theme_daily_stats` 以可重跑方式 upsert。
+
+需在環境變數或 `.env` 設定 `GEMINI_API_KEY`（亦支援 `GOOGLE_API_KEY`）。單次執行完整 ETL：
+
+```powershell
+python -m trends.etl
+```
+
+預設每次最多分類 200 個關鍵字與 200 篇新聞（各 10 次 Gemini 批次請求）；可使用 `--news-limit 0` 處理全部待分類新聞。若 API 回報每日配額耗盡，該層會停止並將剩餘列留待下次排程。每日台北時間 20:00 排程：
+
+```powershell
+python -m trends.etl --schedule
+```
+
+Dashboard 的「分類 RSS 關鍵字與新聞」按鈕則以每次 100 筆增量處理。所有語言與新聞來源都會納入；主題透過所屬 Trends keyword 的 classification 關聯，不依新聞語言或來源篩選。無 API key 時，keyword 可使用明確標記為 `fallback` 的規則分類；新聞 AI 分類會保留待處理，不會填入假造的 AI 結果。
 
 每日關鍵字數較多時，回補可能需要數分鐘；Google Trends 可能限流，Collector 會記錄失敗關鍵字並繼續處理其餘項目。正 Lag 表示關鍵字熱度先於股票日報酬，負 Lag 表示股價報酬先行。新聞後 5 日報酬以新聞日期之後的下一個交易日收盤作為觀察起點。
 

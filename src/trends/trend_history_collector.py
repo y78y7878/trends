@@ -11,6 +11,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.database import GoogleTrendsHistory, ThemeMapping, get_engine, init_db
+from trends.keyword_classification import classify_pending_keywords
 from trends.theme_study import sync_theme_mapping
 
 
@@ -42,14 +43,17 @@ def collect_trend_history(
     days: int = 90,
     request_delay: float = 1.5,
     trend_client=None,
+    classify_keywords: bool = True,
 ) -> int:
     db_engine = init_db(engine or get_engine())
+    if classify_keywords:
+        classify_pending_keywords(db_engine, limit=200)
     sync_theme_mapping(db_engine)
     with db_engine.connect() as connection:
         mappings = pd.read_sql(
             select(ThemeMapping.theme_name, ThemeMapping.keyword).distinct().order_by(
                 ThemeMapping.theme_name, ThemeMapping.keyword
-            ),
+            ).where(ThemeMapping.active == 1),
             connection,
         )
     if mappings.empty:

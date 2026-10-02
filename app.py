@@ -12,8 +12,19 @@ from sqlalchemy import or_, select
 import trends.event_study
 
 from trends.alpha_signal import parse_traffic, score_signals
-from trends.database import GoogleTrend, GoogleTrendNews, GoogleTrendsHistory, Stock, ThemeMapping, get_engine, init_db
+from trends.database import (
+    GoogleTrend,
+    GoogleTrendNews,
+    GoogleTrendsHistory,
+    KeywordClassification,
+    Stock,
+    ThemeDailyStats,
+    ThemeMapping,
+    get_engine,
+    init_db,
+)
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
+from trends.keyword_classification import classify_pending_keywords, classify_pending_news
 from trends.sentiment import analyze_pending_news
 from trends.stock_collector import fetch_and_store
 from trends.theme_study import (
@@ -108,8 +119,11 @@ def load_trend_observations() -> pd.DataFrame:
             GoogleTrendNews.news_title,
             GoogleTrendNews.news_url,
             GoogleTrendNews.news_source,
+            KeywordClassification.canonical_keyword,
+            KeywordClassification.theme_name.label("classification_theme"),
         )
         .outerjoin(GoogleTrendNews, GoogleTrendNews.trend_id == GoogleTrend.id)
+        .outerjoin(KeywordClassification, KeywordClassification.keyword == GoogleTrend.keyword)
         .where(
             or_(
                 GoogleTrend.fetched_at >= RESEARCH_START.to_pydatetime(),
@@ -159,6 +173,16 @@ def load_theme_definitions() -> dict[str, dict[str, list[str]]]:
 def load_theme_mapping_rows() -> pd.DataFrame:
     with database_engine().connect() as connection:
         return pd.read_sql(select(ThemeMapping), connection)
+
+
+@st.cache_data(ttl=300)
+def load_theme_daily_stats() -> pd.DataFrame:
+    start_date = (pd.Timestamp.now().normalize() - pd.Timedelta(days=29)).date()
+    statement = select(ThemeDailyStats).where(ThemeDailyStats.stat_date >= start_date).order_by(
+        ThemeDailyStats.stat_date, ThemeDailyStats.theme_name
+    )
+    with database_engine().connect() as connection:
+        return pd.read_sql(statement, connection)
 
 
 def show_empty(message: str) -> None:
@@ -636,6 +660,16 @@ def page_theme_study() -> None:
     st.subheader("主題覆蓋率")
     coverage_display = coverage.rename(columns={"theme_name": "主題", "event_count": "RSS 事件數", "news_count": "新聞數量"})
     st.dataframe(coverage_display, hide_index=True)
+    st.subheader("Theme Daily Stats")
+    daily_stats = load_theme_daily_stats()
+    if daily_stats.empty:
+        show_empty("尚無每日主題統計；執行 `python -m trends.etl` 建立 Analytics Layer。")
+    else:
+        st.dataframe(daily_stats.rename(columns={
+            "stat_date": "日期", "theme_name": "主題", "keyword_count": "熱度關鍵字數",
+            "news_count": "新聞數", "event_count": "事件數", "avg_trend_score": "平均熱度",
+            "max_trend_score": "最高熱度", "stock_count": "股票數",
+        }), hide_index=True)
     st.subheader("未分類關鍵字 TOP 100")
     if unclassified.empty:
         show_empty("目前沒有未分類的 RSS 關鍵字。")
@@ -707,6 +741,21 @@ with st.sidebar:
         load_events.clear()
         load_clustered_events.clear()
         st.success(f"完成 {count} 筆新聞情緒分類")
+        st.rerun()
+    if st.button("分類 RSS 關鍵字與新聞", icon=":material/auto_awesome:", width="stretch"):
+        with st.spinner("分類 100 個關鍵字與 100 篇新聞…"):
+            keyword_count = classify_pending_keywords(database_engine(), limit=100)
+            try:
+                news_count = classify_pending_news(database_engine(), limit=100)
+            except RuntimeError as error:
+                news_count = 0
+                st.warning(str(error))
+            from trends.etl import refresh_theme_daily_stats
+
+            refresh_theme_daily_stats(database_engine())
+        load_trend_observations.clear()
+        load_theme_daily_stats.clear()
+        st.success(f"完成 {keyword_count} 個關鍵字、{news_count} 篇新聞")
         st.rerun()
     st.caption("行情排程：台北時間每日 18:00\n情緒分類模型首次執行時需下載")
 

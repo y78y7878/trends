@@ -35,6 +35,8 @@ class GoogleTrendNews(Base):
     news_source: Mapped[str | None] = mapped_column(String(255))
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     news_sentiment: Mapped[str | None] = mapped_column(String(20))
+    sentiment_score: Mapped[float | None] = mapped_column(Float)
+    event_type: Mapped[str | None] = mapped_column(String(50))
 
 
 class Stock(Base):
@@ -80,6 +82,21 @@ class ThemeMapping(Base):
     keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     stock_id: Mapped[str | None] = mapped_column(String(16), index=True)
     category: Mapped[str | None] = mapped_column(String(100))
+    sub_theme: Mapped[str | None] = mapped_column(String(100))
+    active: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class KeywordClassification(Base):
+    __tablename__ = "keyword_classification"
+
+    keyword: Mapped[str] = mapped_column(String(255), primary_key=True)
+    canonical_keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    theme_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    sub_theme: Mapped[str | None] = mapped_column(String(100))
+    stock_related: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, server_default=text("0"))
+    classification_source: Mapped[str] = mapped_column(String(30), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
 
@@ -93,6 +110,19 @@ class GoogleTrendsHistory(Base):
     trend_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     trend_score: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
+class ThemeDailyStats(Base):
+    __tablename__ = "theme_daily_stats"
+
+    stat_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    theme_name: Mapped[str] = mapped_column(String(100), primary_key=True)
+    keyword_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    news_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    avg_trend_score: Mapped[float | None] = mapped_column(Float)
+    max_trend_score: Mapped[float | None] = mapped_column(Float)
+    stock_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 def get_engine(db_path: str | Path = DB_PATH) -> Engine:
@@ -112,9 +142,25 @@ def init_db(engine: Engine | None = None) -> Engine:
     db_engine = engine or get_engine()
     Base.metadata.create_all(db_engine)
 
-    news_columns = {column["name"] for column in inspect(db_engine).get_columns("google_trends_news")}
-    if "news_sentiment" not in news_columns:
-        with db_engine.begin() as connection:
-            connection.execute(text("ALTER TABLE google_trends_news ADD COLUMN news_sentiment VARCHAR(20)"))
+    migrations = {
+        "google_trends_news": {
+            "news_sentiment": "VARCHAR(20)",
+            "sentiment_score": "FLOAT",
+            "event_type": "VARCHAR(50)",
+        },
+        "theme_mapping": {
+            "sub_theme": "VARCHAR(100)",
+            "active": "INTEGER NOT NULL DEFAULT 1",
+        },
+    }
+    with db_engine.begin() as connection:
+        inspector = inspect(db_engine)
+        for table_name, columns in migrations.items():
+            existing = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name, column_type in columns.items():
+                if column_name not in existing:
+                    connection.execute(text(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
+                    ))
 
     return db_engine
