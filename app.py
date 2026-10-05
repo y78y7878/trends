@@ -27,7 +27,7 @@ from trends.keyword_auto_classification import build_keyword_quality_summary
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
 from trends.keyword_classification import classify_pending_keywords, classify_pending_news
 from trends.entity_resolution_etl import build_entity_coverage, run_entity_resolution_etl
-from trends.sentiment import analyze_pending_news
+from trends.etl import get_system_status, refresh_theme_daily_stats, run_full_update
 from trends.stock_collector import fetch_and_store
 from trends.theme_study import (
     build_daily_theme_heat,
@@ -197,6 +197,17 @@ def load_keyword_quality_summary() -> dict[str, float | int]:
 
 def show_empty(message: str) -> None:
     st.info(message)
+
+
+def clear_dashboard_caches() -> None:
+    load_trends.clear()
+    load_prices.clear()
+    load_events.clear()
+    load_event_clusters.clear()
+    load_clustered_events.clear()
+    load_trend_observations.clear()
+    load_theme_daily_stats.clear()
+    load_keyword_quality_summary.clear()
 
 
 def build_event_clusters(observations: pd.DataFrame) -> pd.DataFrame:
@@ -780,39 +791,98 @@ PAGES = {
 
 with st.sidebar:
     st.title("TRENDS / THEME")
-    selected_page = st.radio("研究頁面", list(PAGES), index=1, label_visibility="collapsed")
+    status = get_system_status(database_engine())
     st.divider()
-    if st.button("更新股價", icon=":material/sync:", width="stretch"):
-        with st.spinner("下載最近行情…"):
-            row_count = fetch_and_store()
-        load_prices.clear()
-        load_events.clear()
-        load_clustered_events.clear()
-        st.success(f"更新 {row_count:,} 筆")
-        st.rerun()
-    if st.button("分析未分類新聞", icon=":material/mood:", width="stretch"):
-        with st.spinner("分析新聞情緒…"):
-            count = analyze_pending_news(database_engine())
-        load_events.clear()
-        load_clustered_events.clear()
-        st.success(f"完成 {count} 筆新聞情緒分類")
-        st.rerun()
-    if st.button("分類 RSS 關鍵字與新聞", icon=":material/auto_awesome:", width="stretch"):
-        with st.spinner("先辨識實體，再分類關鍵字與新聞…"):
-            entity_count = run_entity_resolution_etl(database_engine(), limit=100)
-            keyword_count = classify_pending_keywords(database_engine(), limit=100, resolve_entities=False)
-            try:
-                news_count = classify_pending_news(database_engine(), limit=100)
-            except RuntimeError as error:
-                news_count = 0
-                st.warning(str(error))
-            from trends.etl import refresh_theme_daily_stats
+    st.caption("📊 系統狀態")
+    trend_time = status["latest_trend_at"]
+    trend_label = "正常" if status["health"] != "stale" else "超過 24 小時未更新"
+    trend_updated = f"最後資料時間：{trend_time:%Y-%m-%d %H:%M}" if trend_time else "尚無資料"
+    st.caption(f"Google Trends 資料：{trend_label}\n\n{trend_updated}")
+    if status["health"] == "stale":
+        st.error(status["health_label"])
+    elif status["health"] == "pending":
+        st.warning(status["health_label"])
+    else:
+        st.success(status["health_label"])
 
-            refresh_theme_daily_stats(database_engine())
-        load_trend_observations.clear()
-        load_theme_daily_stats.clear()
-        st.success(f"辨識 {entity_count} 個實體，完成 {keyword_count} 個關鍵字、{news_count} 篇新聞")
-        st.rerun()
-    st.caption("行情排程：台北時間每日 18:00\n情緒分類模型首次執行時需下載")
+    keyword_total = int(status["total_keywords"])
+    classified_total = int(status["classified_keywords"])
+    coverage = (keyword_total - int(status["unclassified_keywords"])) / keyword_total if keyword_total else 0
+    st.caption("📊 資料庫狀態")
+    st.caption(
+        f"RSS 關鍵字 {keyword_total:,}｜已分類 {classified_total:,}｜覆蓋率 {coverage:.1%}\n\n"
+        f"新聞 {int(status['total_news']):,}｜已分析 {int(status['analyzed_news']):,}｜"
+        f"未分析 {int(status['unanalyzed_news']):,}\n\n"
+        f"股票資料 {int(status['stock_rows']):,} 筆｜主題 {int(status['theme_count']):,} 個"
+    )
+    st.caption("📋 待處理資料")
+    st.caption(
+        f"未分類關鍵字 {int(status['unclassified_keywords']):,}｜"
+        f"未分析新聞 {int(status['unanalyzed_news']):,}｜"
+        f"待辨識實體 {int(status['pending_entities']):,}"
+    )
+    history_start = status["history_start"] or "尚無資料"
+    history_end = status["history_end"] or "尚無資料"
+    st.caption("🎯 專案摘要")
+    st.caption(
+        f"追蹤主題 {int(status['theme_count']):,}｜股票 {int(status['tracked_stock_count']):,}\n\n"
+        f"Trends 關鍵字 {keyword_total:,}｜事件 {int(status['event_count']):,}｜"
+        f"新聞 {int(status['total_news']):,}\n\n"
+        f"歷史期間 {history_start} ～ {history_end}"
+    )
+
+    last_update_result = st.session_state.pop("last_update_result", None)
+    if last_update_result:
+        st.success("✅ 更新完成")
+        st.caption(
+            f"股價更新：{last_update_result['stock_rows']:,} 筆\n\n"
+            f"實體辨識：{last_update_result['resolved_entities']:,} 筆\n\n"
+            f"關鍵字分類：{last_update_result['classified_keywords']:,} 筆\n\n"
+            f"新聞分類：{last_update_result['classified_news']:,} 筆\n\n"
+            f"剩餘未分類關鍵字：{last_update_result['unclassified_keywords']:,}\n\n"
+            f"剩餘未分析新聞：{last_update_result['unanalyzed_news']:,}"
+        )
+
+    if st.button("📥 一鍵更新資料", type="primary", width="stretch"):
+        try:
+            with st.spinner("更新股價、辨識實體並分析 Trends 與新聞…"):
+                result = run_full_update(database_engine())
+            clear_dashboard_caches()
+            st.session_state["last_update_result"] = result
+            st.rerun()
+        except Exception as error:
+            clear_dashboard_caches()
+            st.error(f"資料更新未完成：{error}")
+
+    with st.expander("進階維護工具"):
+        if st.button("📈 更新股價", width="stretch"):
+            with st.spinner("下載最近行情…"):
+                row_count = fetch_and_store(engine=database_engine())
+            clear_dashboard_caches()
+            st.session_state["maintenance_message"] = f"股價更新完成：{row_count:,} 筆"
+            st.rerun()
+        if st.button("🤖 分類 RSS 關鍵字與新聞", width="stretch"):
+            try:
+                with st.spinner("先辨識實體，再分類關鍵字與新聞…"):
+                    entity_count = run_entity_resolution_etl(database_engine(), limit=100)
+                    keyword_count = classify_pending_keywords(
+                        database_engine(), limit=100, resolve_entities=False
+                    )
+                    news_count = classify_pending_news(database_engine(), limit=100)
+                    refresh_theme_daily_stats(database_engine())
+                clear_dashboard_caches()
+                st.session_state["maintenance_message"] = (
+                    f"實體 {entity_count:,} 筆、關鍵字 {keyword_count:,} 筆、新聞 {news_count:,} 筆"
+                )
+                st.rerun()
+            except Exception as error:
+                clear_dashboard_caches()
+                st.error(f"分類流程未完成：{error}")
+        maintenance_message = st.session_state.pop("maintenance_message", None)
+        if maintenance_message:
+            st.success(maintenance_message)
+
+    st.divider()
+    selected_page = st.radio("研究頁面", list(PAGES), index=1, label_visibility="collapsed")
 
 PAGES[selected_page]()

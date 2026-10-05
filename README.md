@@ -114,12 +114,11 @@ src/trends/database.py         SQLAlchemy models、SQLite 初始化與相容遷�
 src/trends/stock_collector.py  yfinance 歷史回補、增量更新與每日排程
 src/trends/features.py         前/後 1、3、5、10 日報酬及成交量變化
 src/trends/keyword_mapping.py  RapidFuzz 事件分類與多股票配對
-src/trends/sentiment.py        Transformers 多語新聞情緒分類
 src/trends/event_study.py      多股票事件對齊、資料持久化與事件統計
 src/trends/alpha_signal.py     Alpha Signal 分數與狀態標籤
 src/trends/keyword_classification.py Gemini 關鍵字正規化、主題分類及新聞事件/情緒標註
 src/trends/entity_resolution_etl.py Entity Resolution、公司產業對應與實體覆蓋率
-src/trends/etl.py              Clean、Theme、History、Analytics 層可重跑 ETL
+src/trends/etl.py              統一更新流程、系統健康度及 Analytics ETL
 src/trends/trend_history_collector.py pytrends 近 90 日歷史熱度收集器
 entity_seed_mapping.csv        人工維護的公司實體、股票代號、產業及別名
 ```
@@ -138,12 +137,6 @@ python -m trends.stock_collector --schedule
 ```
 
 不帶 `--schedule` 則立即抓取一次。預設股票池由 `keyword_theme_mapping.csv` 去重產生，涵蓋約 48 檔台股 ETF、產業代表股及美股；台股代號會轉為 yfinance 的 `.TW` 格式。映射欄位為 `keyword,type,stock_id`，其中 `type` 為 `company`、`industry` 或 `theme`，同一 keyword 可有多筆股票。
-
-新聞情緒模型採用多語 Transformers 模型，第一次分析需要下載模型。安裝可選依賴後，在「新聞事件分析」頁按下分類按鈕：
-
-```powershell
-pip install transformers torch
-```
 
 若需重新建立／檢查 schema，使用 `schema.sql`；程式的 `init_db()` 會自動建立資料表並遷移舊新聞表。資料欄位及索引定義以 [schema.sql](schema.sql) 為準。
 

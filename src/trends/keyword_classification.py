@@ -269,14 +269,16 @@ def classify_pending_keywords(
             ),
         )
     with db_engine.connect() as connection:
-        keywords = connection.execute(
-            select(GoogleTrend.keyword)
-            .outerjoin(KeywordClassification, GoogleTrend.keyword == KeywordClassification.keyword)
-            .where(GoogleTrend.keyword.is_not(None), pending_condition)
-            .distinct()
-            .order_by(GoogleTrend.keyword)
-            .limit(limit)
-        ).scalars().all()
+            statement = (
+                select(GoogleTrend.keyword)
+                .outerjoin(KeywordClassification, GoogleTrend.keyword == KeywordClassification.keyword)
+                .where(GoogleTrend.keyword.is_not(None), pending_condition)
+                .distinct()
+                .order_by(GoogleTrend.keyword)
+            )
+            if limit > 0:
+                statement = statement.limit(limit)
+            keywords = connection.execute(statement).scalars().all()
     if not keywords:
         return 0
 
