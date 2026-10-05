@@ -227,6 +227,134 @@ def summarize_event_study(event_frame: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def detect_research_events(
+    daily_heat: pd.DataFrame,
+    daily_news: pd.DataFrame,
+    heat_growth_threshold: float = 0.5,
+    news_multiple_threshold: float = 2.0,
+    minimum_news_count: int = 3,
+) -> pd.DataFrame:
+    columns = ["event_date", "keyword", "event_heat", "news_count", "heat_change", "trigger"]
+    heat = daily_heat.copy()
+    news = daily_news.copy()
+    if heat.empty:
+        heat = pd.DataFrame(columns=["date", "keyword", "heat"])
+    if news.empty:
+        news = pd.DataFrame(columns=["date", "keyword", "news_count"])
+    if not heat.empty:
+        heat["date"] = pd.to_datetime(heat["date"], errors="coerce").dt.normalize()
+        heat["heat"] = pd.to_numeric(heat["heat"], errors="coerce")
+        heat = heat.dropna(subset=["date", "keyword", "heat"])
+        heat = heat.groupby(["date", "keyword"], as_index=False)["heat"].mean()
+    if not news.empty:
+        news["date"] = pd.to_datetime(news["date"], errors="coerce").dt.normalize()
+        news = news.dropna(subset=["date", "keyword"])
+        if "news_id" in news:
+            news = news.drop_duplicates("news_id")
+        news = news.groupby(["date", "keyword"], as_index=False).size().rename(columns={"size": "news_count"})
+
+    if heat.empty and news.empty:
+        return pd.DataFrame(columns=columns)
+
+    keywords = sorted(set(heat.get("keyword", [])) | set(news.get("keyword", [])))
+    output: list[dict] = []
+    for keyword in keywords:
+        keyword_heat = heat.loc[heat["keyword"].eq(keyword)].set_index("date")["heat"]
+        keyword_news = news.loc[news["keyword"].eq(keyword)].set_index("date")["news_count"]
+        observed_dates = keyword_heat.index.union(keyword_news.index)
+        dates = pd.date_range(observed_dates.min(), observed_dates.max(), freq="D")
+        heat_series = keyword_heat.reindex(dates)
+        news_series = keyword_news.reindex(dates, fill_value=0)
+        prior_heat = heat_series.rolling(7, min_periods=3).mean().shift(1)
+        prior_news = news_series.rolling(7, min_periods=3).mean().shift(1)
+        heat_change = heat_series.div(prior_heat).sub(1)
+        heat_trigger = heat_change.ge(heat_growth_threshold) & prior_heat.gt(0)
+        news_trigger = (
+            news_series.ge(minimum_news_count)
+            & news_series.ge(prior_news * news_multiple_threshold)
+            & prior_news.notna()
+        )
+
+        for event_date in dates[heat_trigger | news_trigger]:
+            reasons = []
+            if heat_trigger.loc[event_date]:
+                reasons.append("搜尋熱度上升")
+            if news_trigger.loc[event_date]:
+                reasons.append("新聞量增加")
+            output.append({
+                "event_date": event_date,
+                "keyword": keyword,
+                "event_heat": heat_series.loc[event_date],
+                "news_count": int(news_series.loc[event_date]),
+                "heat_change": heat_change.loc[event_date],
+                "trigger": "、".join(reasons),
+            })
+
+    return pd.DataFrame(output, columns=columns).sort_values(
+        ["event_date", "keyword"], ascending=[False, True]
+    ).reset_index(drop=True)
+
+
+def calculate_event_performance(events: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+    return_columns = [f"return_{days}d" for days in RETURN_DAYS]
+    columns = [
+        *events.columns,
+        "market_date",
+        *return_columns,
+        "max_gain_10d",
+        "max_loss_10d",
+        "reaction_days",
+    ]
+    if events.empty or prices.empty:
+        return pd.DataFrame(columns=columns)
+
+    frame = prices.copy()
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.normalize()
+    for column in ("close", "high", "low"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame.dropna(subset=["date", "stock_id", "close"])
+    price_groups = {
+        str(stock_id): group.sort_values("date").reset_index(drop=True)
+        for stock_id, group in frame.groupby("stock_id", sort=False)
+    }
+    output: list[dict] = []
+    for event in events.to_dict(orient="records"):
+        stock_prices = price_groups.get(str(event.get("stock_id", "")))
+        if stock_prices is None:
+            continue
+        event_date = pd.to_datetime(event.get("event_date"), errors="coerce")
+        if pd.isna(event_date):
+            continue
+        market_dates = stock_prices["date"].to_numpy(dtype="datetime64[ns]")
+        position = int(market_dates.searchsorted(event_date.normalize().to_datetime64(), side="left"))
+        if position >= len(stock_prices):
+            continue
+        base_close = stock_prices.iloc[position]["close"]
+        if pd.isna(base_close) or base_close == 0:
+            continue
+
+        result = {**event, "market_date": stock_prices.iloc[position]["date"]}
+        for days in RETURN_DAYS:
+            future_position = position + days
+            result[f"return_{days}d"] = (
+                stock_prices.iloc[future_position]["close"] / base_close - 1
+                if future_position < len(stock_prices)
+                else pd.NA
+            )
+        future_prices = stock_prices.iloc[position + 1:position + 11]
+        result["max_gain_10d"] = future_prices["high"].max() / base_close - 1 if future_prices["high"].notna().any() else pd.NA
+        result["max_loss_10d"] = future_prices["low"].min() / base_close - 1 if future_prices["low"].notna().any() else pd.NA
+        future_closes = future_prices["close"].dropna()
+        if future_closes.empty:
+            result["reaction_days"] = pd.NA
+        else:
+            cumulative_returns = future_closes.div(base_close).sub(1)
+            result["reaction_days"] = int(cumulative_returns.abs().idxmax() - position)
+        output.append(result)
+
+    return pd.DataFrame(output, columns=columns)
+
+
 def run_event_study(engine: Engine, mapping_path: str | Path = DEFAULT_MAPPING_PATH) -> tuple[pd.DataFrame, pd.DataFrame]:
     events = build_event_frame(engine, mapping_path)
     persist_event_analysis(engine, events)
