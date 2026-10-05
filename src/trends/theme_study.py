@@ -242,6 +242,130 @@ def build_daily_theme_heat(observations: pd.DataFrame, keywords: list[str]) -> p
     )
 
 
+def build_subtheme_daily_heat(daily_heat: pd.DataFrame, theme_mapping: pd.DataFrame) -> pd.DataFrame:
+    columns = ["date", "theme_name", "heat", "keyword_count"]
+    required_mapping = {"sub_theme", "keyword"}
+    if daily_heat.empty or theme_mapping.empty or not required_mapping.issubset(theme_mapping.columns):
+        return pd.DataFrame(columns=columns)
+
+    mapping = theme_mapping.copy()
+    if "active" in mapping:
+        mapping = mapping[mapping["active"].astype(str).str.casefold().isin(("1", "true"))]
+    mapping = mapping.dropna(subset=["sub_theme", "keyword"])
+    mapping = mapping[mapping["sub_theme"].astype(str).str.strip().ne("")]
+    mapping["normalized_keyword"] = mapping["keyword"].map(_normalize_keyword)
+    mapping = mapping[["sub_theme", "normalized_keyword", "keyword"]].drop_duplicates(
+        ["sub_theme", "normalized_keyword"]
+    )
+
+    heat = daily_heat.copy()
+    heat["date"] = pd.to_datetime(heat["date"], errors="coerce").dt.normalize()
+    heat["normalized_keyword"] = heat["keyword"].map(_normalize_keyword)
+    heat["heat"] = pd.to_numeric(heat["heat"], errors="coerce")
+    heat = heat.dropna(subset=["date", "heat"])
+    joined = heat.merge(mapping, on="normalized_keyword", how="inner")
+    if joined.empty:
+        return pd.DataFrame(columns=columns)
+    return (
+        joined.groupby(["date", "sub_theme"], as_index=False).agg(
+            heat=("heat", "mean"), keyword_count=("normalized_keyword", "nunique")
+        )
+        .rename(columns={"sub_theme": "theme_name"})[columns]
+        .sort_values(["date", "theme_name"])
+        .reset_index(drop=True)
+    )
+
+
+def correlation_confidence(sample_count: int, correlation: float) -> str | None:
+    if pd.isna(correlation):
+        return None
+    absolute_correlation = abs(float(correlation))
+    if sample_count >= 90 and absolute_correlation >= 0.6:
+        return "A"
+    if sample_count >= 60 and absolute_correlation >= 0.4:
+        return "B"
+    if sample_count >= 30 and absolute_correlation >= 0.3:
+        return "C"
+    return None
+
+
+def build_theme_cross_correlations(
+    daily_heat: pd.DataFrame,
+    prices: pd.DataFrame,
+    theme_mapping: pd.DataFrame,
+    stock_ids: list[str] | None = None,
+    min_lag: int = -10,
+    max_lag: int = 10,
+    min_observations: int = 30,
+) -> pd.DataFrame:
+    columns = [
+        "theme_name", "stock_id", "pearson", "best_lag", "best_correlation",
+        "sample_count", "confidence_grade",
+    ]
+    if daily_heat.empty or prices.empty or theme_mapping.empty:
+        return pd.DataFrame(columns=columns)
+
+    theme_heat = build_subtheme_daily_heat(daily_heat, theme_mapping)
+    if theme_heat.empty:
+        return pd.DataFrame(columns=columns)
+    mapping = theme_mapping.copy()
+    if "active" in mapping:
+        mapping = mapping[mapping["active"].astype(str).str.casefold().isin(("1", "true"))]
+    pairs = mapping.dropna(subset=["sub_theme", "stock_id"])[["sub_theme", "stock_id"]].copy()
+    pairs["stock_id"] = pairs["stock_id"].astype(str)
+    pairs = pairs[pairs["stock_id"].str.strip().ne("")].drop_duplicates()
+    if stock_ids is not None:
+        pairs = pairs[pairs["stock_id"].isin(set(map(str, stock_ids)))]
+    if pairs.empty:
+        return pd.DataFrame(columns=columns)
+
+    price_frame = prices.copy()
+    price_frame["date"] = pd.to_datetime(price_frame["date"], errors="coerce").dt.normalize()
+    price_frame["stock_id"] = price_frame["stock_id"].astype(str)
+    price_frame["close"] = pd.to_numeric(price_frame["close"], errors="coerce")
+    price_frame = price_frame.dropna(subset=["date", "close"])
+    rows = []
+    for pair in pairs.itertuples(index=False):
+        theme_name = str(pair.sub_theme)
+        stock_id = str(pair.stock_id)
+        stock = price_frame[price_frame["stock_id"].eq(stock_id)].sort_values("date").drop_duplicates("date").copy()
+        if stock.empty:
+            continue
+        stock["stock_return"] = stock["close"].pct_change()
+        heat = theme_heat[theme_heat["theme_name"].eq(theme_name)]
+        aligned = stock[["date", "stock_return"]].merge(
+            heat[["date", "heat"]], on="date", how="left"
+        )
+        same_day = aligned[["heat", "stock_return"]].dropna()
+        pearson = same_day["heat"].corr(same_day["stock_return"]) if len(same_day) >= min_observations else float("nan")
+        lag_results = []
+        for lag in range(min_lag, max_lag + 1):
+            paired = pd.DataFrame({
+                "heat": aligned["heat"],
+                "stock_return": aligned["stock_return"].shift(-lag),
+            }).dropna()
+            if len(paired) < min_observations:
+                continue
+            correlation = paired["heat"].corr(paired["stock_return"])
+            if pd.notna(correlation):
+                lag_results.append((lag, float(correlation), len(paired)))
+        if not lag_results:
+            continue
+        best_lag, best_correlation, sample_count = max(
+            lag_results, key=lambda result: (abs(result[1]), -abs(result[0]), -result[0])
+        )
+        rows.append({
+            "theme_name": theme_name,
+            "stock_id": stock_id,
+            "pearson": pearson,
+            "best_lag": best_lag,
+            "best_correlation": best_correlation,
+            "sample_count": sample_count,
+            "confidence_grade": correlation_confidence(sample_count, best_correlation),
+        })
+    return pd.DataFrame(rows, columns=columns)
+
+
 def build_relative_returns(prices: pd.DataFrame, stock_ids: list[str]) -> pd.DataFrame:
     columns = ["date", "stock_id", "base_100", "close"]
     if prices.empty or not stock_ids:
@@ -324,7 +448,7 @@ def build_cross_correlations(
     stock_ids: list[str],
     min_lag: int = -10,
     max_lag: int = 10,
-    min_observations: int = 5,
+    min_observations: int = 30,
 ) -> pd.DataFrame:
     columns = ["stock_id", "keyword", "best_lag", "best_correlation", "sample_count"]
     if daily_heat.empty or prices.empty or not stock_ids:

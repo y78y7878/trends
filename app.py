@@ -32,12 +32,14 @@ from trends.stock_collector import fetch_and_store
 from trends.theme_study import (
     build_daily_theme_heat,
     build_cross_correlations,
+    build_theme_cross_correlations,
     build_heat_price_correlations,
     build_post_news_returns,
     build_relative_returns,
     build_stock_technicals,
     build_theme_coverage,
     build_theme_definitions,
+    correlation_confidence,
     build_theme_news_timeline,
     build_unclassified_keywords,
     sync_theme_mapping,
@@ -155,8 +157,8 @@ def load_events() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
-def load_theme_history(theme_name: str) -> pd.DataFrame:
-    start_date = (pd.Timestamp.now().normalize() - pd.Timedelta(days=89)).date()
+def load_theme_history(theme_name: str, lookback_days: int = 365) -> pd.DataFrame:
+    start_date = (pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days - 1)).date()
     statement = (
         select(GoogleTrendsHistory)
         .where(
@@ -490,6 +492,96 @@ def page_dashboard() -> None:
         )
 
 
+def render_lag_analysis(
+    theme_correlations: pd.DataFrame,
+    keyword_correlations: pd.DataFrame,
+    same_day_correlations: pd.DataFrame,
+) -> None:
+    analysis_level = st.radio(
+        "分析層級",
+        ["Theme", "Keyword"],
+        format_func=lambda value: "Keyword（進階）" if value == "Keyword" else value,
+        horizontal=True,
+        index=0,
+        key="lag_analysis_level",
+    )
+    st.caption("比較熱度與股票日報酬，掃描 Lag -10 到 +10 個交易日。正值表示主題／關鍵字熱度領先股價報酬。最低有效樣本數 30。")
+    st.warning("⚠ 歷史相關不代表因果關係　⚠ 相關係數僅供研究參考　⚠ 樣本期間不足時結果可能失真")
+
+    if analysis_level == "Theme":
+        results = theme_correlations.copy()
+        name_column = "theme_name"
+        name_label = "主題"
+    else:
+        results = keyword_correlations.merge(
+            same_day_correlations[["stock_id", "keyword", "pearson"]],
+            on=["stock_id", "keyword"],
+            how="left",
+        ) if not keyword_correlations.empty else keyword_correlations.copy()
+        if not results.empty:
+            results["confidence_grade"] = results.apply(
+                lambda row: correlation_confidence(int(row["sample_count"]), row["best_correlation"]),
+                axis=1,
+            )
+        name_column = "keyword"
+        name_label = "關鍵字"
+
+    if results.empty:
+        show_empty("目前沒有符合樣本門檻的主題／關鍵字與股票組合。")
+        return
+    results = results[
+        (pd.to_numeric(results["sample_count"], errors="coerce") >= 30)
+        & results["confidence_grade"].notna()
+        & results["best_lag"].notna()
+        & results["best_correlation"].notna()
+    ].copy()
+    if results.empty:
+        show_empty("目前沒有樣本數至少 30 且達 C 級可信度的結果。")
+        return
+
+    results = results.sort_values(
+        ["best_correlation", "sample_count"],
+        key=lambda values: values.abs() if values.name == "best_correlation" else values,
+        ascending=[False, False],
+    )
+    results.insert(0, "股票", results["stock_id"].map(lambda stock_id: f"{stock_id} {get_stock_name(stock_id)}"))
+    results["最佳 Lag"] = results["best_lag"].map(lambda value: f"{int(value):+d}")
+    results = results.rename(columns={
+        name_column: name_label,
+        "pearson": "Pearson",
+        "best_correlation": "最佳相關",
+        "sample_count": "樣本數",
+        "confidence_grade": "可信度",
+    })
+    st.dataframe(
+        results[["主題" if analysis_level == "Theme" else "關鍵字", "股票", "Pearson", "最佳 Lag", "最佳相關", "樣本數", "可信度"]],
+        column_config={
+            "Pearson": st.column_config.NumberColumn(format="%.2f"),
+            "最佳相關": st.column_config.NumberColumn(format="%.2f"),
+        },
+        hide_index=True,
+    )
+
+    for row in results.head(3).itertuples(index=False):
+        values = row._asdict()
+        subject = values["主題" if analysis_level == "Theme" else "關鍵字"]
+        stock_id = str(values["stock_id"])
+        stock_name = f"{stock_id} {get_stock_name(stock_id)}"
+        lag = int(values["best_lag"])
+        correlation = float(values["best_correlation"])
+        direction = "正向" if correlation > 0 else "負向"
+        if lag > 0:
+            interpretation = f"{subject}主題熱度領先{stock_name} {lag} 個交易日"
+        elif lag < 0:
+            interpretation = f"{stock_name}股價報酬領先{subject}熱度 {abs(lag)} 個交易日"
+        else:
+            interpretation = f"{subject}主題熱度與{stock_name}股價報酬以同日相關最高"
+        st.caption(
+            f"{interpretation}，歷史呈現{direction}相關，最佳相關係數 {correlation:.2f}；"
+            f"樣本 {int(values['樣本數'])} 筆，可信度 {values['可信度']} 級。"
+        )
+
+
 def page_theme_study() -> None:
     st.title("主題研究")
     st.caption("Theme Analysis · 主題熱度、關鍵字驅動、股票敏感度與新聞後報酬")
@@ -515,17 +607,36 @@ def page_theme_study() -> None:
         key="theme_indicators",
     )
 
-    history = load_theme_history(theme_name)
+    history = load_theme_history(theme_name, lookback_days=365)
     all_prices = load_prices()
     prices = all_prices[all_prices["stock_id"].astype(str).isin(selected_stock_ids)].copy() if not all_prices.empty else all_prices
     observations = load_trend_observations()
     daily_heat = build_daily_theme_heat(history, selected_keywords)
+    mapping_rows = load_theme_mapping_rows()
+    selected_theme_mapping = mapping_rows[
+        mapping_rows["theme_name"].eq(theme_name)
+        & mapping_rows["active"].astype(str).str.casefold().isin(("1", "true"))
+    ].copy()
+    all_theme_keyword_heat = build_daily_theme_heat(history, keywords)
     news = build_theme_news_timeline(observations, selected_keywords)
     relative_returns = build_relative_returns(prices, selected_stock_ids)
     technical_frame = build_stock_technicals(prices, selected_stock_ids)
-    same_day = build_heat_price_correlations(daily_heat, prices, selected_stock_ids)
-    cross_correlations = build_cross_correlations(daily_heat, prices, selected_stock_ids, -10, 10)
-    mapping_rows = load_theme_mapping_rows()
+    same_day = build_heat_price_correlations(
+        daily_heat, prices, selected_stock_ids, min_observations=30
+    )
+    keyword_cross_correlations = build_cross_correlations(
+        daily_heat, prices, selected_stock_ids, -10, 10, min_observations=30
+    )
+    theme_lag_analysis = build_theme_cross_correlations(
+        all_theme_keyword_heat,
+        prices,
+        selected_theme_mapping,
+        selected_stock_ids,
+        -10,
+        10,
+        min_observations=30,
+    )
+    cross_correlations = theme_lag_analysis
     coverage = build_theme_coverage(observations, mapping_rows)
     unclassified = build_unclassified_keywords(observations, mapping_rows)
     theme_counts = coverage[coverage["theme_name"] == theme_name]
@@ -572,6 +683,9 @@ def page_theme_study() -> None:
         st.metric("主題事件數", f"{event_count:,}")
         st.metric("新聞數量", f"{news_count:,}")
         st.metric("熱度平均領先", average_lead)
+
+    st.subheader("Lag Analysis · Cross Correlation")
+    render_lag_analysis(theme_lag_analysis, keyword_cross_correlations, same_day)
 
     st.subheader("Google Trends × News × 股價同步時間軸")
     st.caption("依序觀察 Google Trends 熱度、新聞發布與股票相對報酬，對照事件發生的先後關係。")
@@ -669,43 +783,6 @@ def page_theme_study() -> None:
         ))
         heatmap.update_layout(height=max(320, 34 * len(selected_stock_ids)), xaxis_title="關鍵字", yaxis_title="股票")
         st.plotly_chart(heatmap, width="stretch")
-
-    st.subheader("Lag Analysis · Cross Correlation")
-    st.caption("比較每日熱度與股票日報酬，掃描 Lag -10 到 +10 個交易日。正值表示關鍵字熱度領先股價報酬；負值表示股價先行。最佳相關依絕對值選取，每組至少 5 筆有效樣本。")
-    if cross_correlations.empty:
-        show_empty("所選關鍵字與股票沒有足夠的歷史資料可計算 Lag。")
-    else:
-        lag_display = same_day.merge(cross_correlations, on=["stock_id", "keyword"], how="outer")
-        lag_display.insert(0, "股票", lag_display["stock_id"].map(lambda stock_id: f"{stock_id} {get_stock_name(stock_id)}"))
-        lag_display["最佳 Lag"] = lag_display["best_lag"].map(
-            lambda value: f"{int(value):+d}" if pd.notna(value) else "N/A"
-        )
-        lag_display = lag_display.rename(columns={
-            "keyword": "關鍵字", "pearson": "Pearson", "best_correlation": "最佳相關",
-            "sample_count_y": "Lag 樣本數", "sample_count_x": "同日樣本數",
-        })
-        lag_display = lag_display[["股票", "關鍵字", "Pearson", "最佳 Lag", "最佳相關", "Lag 樣本數"]].sort_values(
-            "最佳相關", key=lambda values: values.abs(), ascending=False, na_position="last"
-        )
-        st.dataframe(lag_display, column_config={
-            column: st.column_config.NumberColumn(format="%.2f")
-            for column in ("Pearson", "最佳相關")
-        }, hide_index=True)
-        strongest = cross_correlations.dropna(subset=["best_lag", "best_correlation"]).sort_values(
-            "best_correlation", key=lambda values: values.abs(), ascending=False
-        ).head(1)
-        if not strongest.empty:
-            strongest_row = strongest.iloc[0]
-            lag = int(strongest_row["best_lag"])
-            stock_name = get_stock_name(strongest_row["stock_id"])
-            direction = "同向" if strongest_row["best_correlation"] > 0 else "反向"
-            lag_meaning = (
-                f"{strongest_row['keyword']} 熱度領先 {stock_name} {lag} 個交易日，兩者{direction}相關"
-                if lag > 0 else
-                f"{stock_name} 股價報酬領先 {strongest_row['keyword']} 熱度 {abs(lag)} 個交易日，兩者{direction}相關"
-                if lag < 0 else f"熱度與 {stock_name} 股價報酬以同日相關最高，兩者{direction}相關"
-            )
-            st.caption(f"最佳組合解讀：{lag_meaning}，相關係數 {strongest_row['best_correlation']:.2f}。這是歷史相關，不代表因果或預測。")
 
     st.subheader("新聞時間軸與新聞後進場空間")
     if news.empty:
