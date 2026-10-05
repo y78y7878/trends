@@ -244,8 +244,13 @@ def classify_pending_keywords(
     classifier: KeywordBatchClassifier | None = None,
     batch_size: int = BATCH_SIZE,
     limit: int = 500,
+    resolve_entities: bool = True,
 ) -> int:
     db_engine = init_db(engine)
+    if resolve_entities:
+        from trends.entity_resolution_etl import run_entity_resolution_etl
+
+        run_entity_resolution_etl(db_engine, limit=limit)
     mapping = load_theme_mapping()
     company_mapping = load_keyword_mapping()
     ai_classifier = classifier

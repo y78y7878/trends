@@ -118,8 +118,10 @@ src/trends/sentiment.py        Transformers 多語新聞情緒分類
 src/trends/event_study.py      多股票事件對齊、資料持久化與事件統計
 src/trends/alpha_signal.py     Alpha Signal 分數與狀態標籤
 src/trends/keyword_classification.py Gemini 關鍵字正規化、主題分類及新聞事件/情緒標註
+src/trends/entity_resolution_etl.py Entity Resolution、公司產業對應與實體覆蓋率
 src/trends/etl.py              Clean、Theme、History、Analytics 層可重跑 ETL
 src/trends/trend_history_collector.py pytrends 近 90 日歷史熱度收集器
+entity_seed_mapping.csv        人工維護的公司實體、股票代號、產業及別名
 ```
 
 ### 安裝與執行
@@ -164,6 +166,14 @@ python -m trends.trend_history_collector --schedule
 ### Warehouse ETL
 
 原始 `google_trends`、`google_trends_news`、`stocks`、`event_analysis` 資料不會被分類流程更新或刪除。`keyword_classification` 以原始 keyword 為主鍵，保存 AI canonical keyword、主題/次分類、股票關聯與信心分數；AI 結果會寫入 `theme_mapping`，歷史分數、新聞 enrichment 與 `theme_daily_stats` 以可重跑方式 upsert。
+
+關鍵字分類前會先執行 Entity Resolution：優先使用 `entity_seed_mapping.csv` 與股票映射辨識公司，再以 Gemini 補充其他實體；上市公司主題依產業規則決定。可單獨執行或回補 Entity Layer：
+
+```powershell
+python -m trends.entity_resolution_etl --limit 500
+```
+
+`entity_master` 保存 canonical entity 與類型；`keyword_classification` 另保存 `entity_name`、`entity_type`。市場總覽的 Entity Coverage 顯示辨識率及未辨識關鍵字 TOP 100。
 
 需在環境變數或 `.env` 設定 `GEMINI_API_KEY`（亦支援 `GOOGLE_API_KEY`）。單次執行完整 ETL：
 

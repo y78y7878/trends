@@ -87,11 +87,26 @@ class ThemeMapping(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class EntityMaster(Base):
+    __tablename__ = "entity_master"
+
+    entity_name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    stock_id: Mapped[str | None] = mapped_column(String(16))
+    industry: Mapped[str | None] = mapped_column(String(100))
+    theme_name: Mapped[str | None] = mapped_column(String(100))
+    confidence_score: Mapped[float | None] = mapped_column(Float)
+    data_source: Mapped[str | None] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
+
+
 class KeywordClassification(Base):
     __tablename__ = "keyword_classification"
 
     keyword: Mapped[str] = mapped_column(String(255), primary_key=True)
     canonical_keyword: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    entity_name: Mapped[str | None] = mapped_column(String(255), index=True)
+    entity_type: Mapped[str | None] = mapped_column(String(50), index=True)
     theme_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     sub_theme: Mapped[str | None] = mapped_column(String(100))
     stock_related: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -185,6 +200,8 @@ def init_db(engine: Engine | None = None) -> Engine:
         "keyword_classification": {
             "need_review": "INTEGER NOT NULL DEFAULT 0",
             "reviewed_at": "DATETIME",
+            "entity_name": "VARCHAR(255)",
+            "entity_type": "VARCHAR(50)",
         },
         "news_theme_classification": {
             "theme_name": "VARCHAR(100)",

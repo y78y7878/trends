@@ -26,6 +26,7 @@ from trends.database import (
 from trends.keyword_auto_classification import build_keyword_quality_summary
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
 from trends.keyword_classification import classify_pending_keywords, classify_pending_news
+from trends.entity_resolution_etl import build_entity_coverage, run_entity_resolution_etl
 from trends.sentiment import analyze_pending_news
 from trends.stock_collector import fetch_and_store
 from trends.theme_study import (
@@ -427,6 +428,7 @@ def page_dashboard() -> None:
     trends = load_trends()
     clusters = load_event_clusters()
     prices = load_prices()
+    entity_summary, unresolved_entities = build_entity_coverage(database_engine())
     today = pd.Timestamp.now().normalize()
     matched_clusters = clusters[clusters["stock_ids"].map(bool)] if not clusters.empty else clusters
     first_seen = pd.to_datetime(matched_clusters["first_seen"], errors="coerce") if not matched_clusters.empty else pd.Series(dtype="datetime64[ns]")
@@ -442,6 +444,21 @@ def page_dashboard() -> None:
         st.metric("已配對事件數", f"{len(matched_clusters):,}")
         st.metric("涵蓋股票數", f"{len(covered_stock_ids):,}")
         st.metric("今日新增事件數", f"{new_events:,}")
+
+    st.subheader("Entity Coverage")
+    with st.container(horizontal=True):
+        st.metric("總關鍵字數", f"{entity_summary['total_keywords']:,}")
+        st.metric("已辨識實體數", f"{entity_summary['identified_entities']:,}")
+        st.metric("未辨識實體數", f"{entity_summary['unidentified_entities']:,}")
+        st.metric("辨識率", f"{entity_summary['recognition_rate']:.1%}")
+    st.subheader("未辨識實體 TOP 100")
+    if unresolved_entities.empty:
+        show_empty("目前沒有未辨識實體。")
+    else:
+        st.dataframe(
+            unresolved_entities.rename(columns={"keyword": "關鍵字", "trend_count": "出現次數"}),
+            hide_index=True,
+        )
 
     st.subheader("熱門事件排行榜")
     event_ranking = build_event_ranking(matched_clusters)
@@ -781,8 +798,9 @@ with st.sidebar:
         st.success(f"完成 {count} 筆新聞情緒分類")
         st.rerun()
     if st.button("分類 RSS 關鍵字與新聞", icon=":material/auto_awesome:", width="stretch"):
-        with st.spinner("分類 100 個關鍵字與 100 篇新聞…"):
-            keyword_count = classify_pending_keywords(database_engine(), limit=100)
+        with st.spinner("先辨識實體，再分類關鍵字與新聞…"):
+            entity_count = run_entity_resolution_etl(database_engine(), limit=100)
+            keyword_count = classify_pending_keywords(database_engine(), limit=100, resolve_entities=False)
             try:
                 news_count = classify_pending_news(database_engine(), limit=100)
             except RuntimeError as error:
@@ -793,7 +811,7 @@ with st.sidebar:
             refresh_theme_daily_stats(database_engine())
         load_trend_observations.clear()
         load_theme_daily_stats.clear()
-        st.success(f"完成 {keyword_count} 個關鍵字、{news_count} 篇新聞")
+        st.success(f"辨識 {entity_count} 個實體，完成 {keyword_count} 個關鍵字、{news_count} 篇新聞")
         st.rerun()
     st.caption("行情排程：台北時間每日 18:00\n情緒分類模型首次執行時需下載")
 

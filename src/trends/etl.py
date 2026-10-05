@@ -20,6 +20,7 @@ from trends.database import (
     get_engine,
     init_db,
 )
+from trends.entity_resolution_etl import run_entity_resolution_etl
 from trends.keyword_auto_classification import (
     auto_classify_unclassified_keywords,
     classify_pending_news_theme,
@@ -109,7 +110,8 @@ def run_daily_etl(
 ) -> dict[str, int]:
     db_engine = init_db(engine or get_engine())
     mapping_rows = sync_theme_mapping(db_engine)
-    keyword_rows = classify_pending_keywords(db_engine, limit=keyword_limit)
+    entity_rows = run_entity_resolution_etl(db_engine, limit=keyword_limit)
+    keyword_rows = classify_pending_keywords(db_engine, limit=keyword_limit, resolve_entities=False)
     quality_rows = 0
     try:
         quality_rows = auto_classify_unclassified_keywords(db_engine, limit=100)
@@ -127,6 +129,7 @@ def run_daily_etl(
     stats_rows = refresh_theme_daily_stats(db_engine)
     return {
         "mapping_rows": mapping_rows,
+        "resolved_entities": entity_rows,
         "classified_keywords": keyword_rows,
         "quality_classified_keywords": quality_rows,
         "history_rows": history_rows,

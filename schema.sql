@@ -61,9 +61,22 @@ CREATE TABLE IF NOT EXISTS theme_mapping (
     UNIQUE (theme_name, keyword, stock_id, category)
 );
 
+CREATE TABLE IF NOT EXISTS entity_master (
+    entity_name TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    stock_id TEXT,
+    industry TEXT,
+    theme_name TEXT,
+    confidence_score REAL,
+    data_source TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS keyword_classification (
     keyword TEXT PRIMARY KEY,
     canonical_keyword TEXT NOT NULL,
+    entity_name TEXT,
+    entity_type TEXT,
     theme_name TEXT NOT NULL,
     sub_theme TEXT,
     stock_related INTEGER NOT NULL DEFAULT 0,
