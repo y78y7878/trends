@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import importlib
 import inspect
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
-from sqlalchemy import or_, select
+from sqlalchemy import String, func, select, type_coerce
 
 import trends.event_study
 from trends.database import (
@@ -32,6 +32,13 @@ from trends.event_study import (
 )
 from trends.etl import get_system_status, run_full_update
 from trends.theme_study import build_theme_definitions, sync_theme_mapping
+from trends.timeutil import (
+    format_db_datetime,
+    taipei_day_start_utc,
+    taipei_today,
+    utc_series_to_taipei_date,
+    utc_to_taipei,
+)
 
 
 if "start_date" not in inspect.signature(trends.event_study.build_event_frame).parameters:
@@ -99,11 +106,10 @@ def load_trend_observations() -> pd.DataFrame:
         .outerjoin(GoogleTrendNews, GoogleTrendNews.trend_id == GoogleTrend.id)
         .outerjoin(KeywordClassification, KeywordClassification.keyword == GoogleTrend.keyword)
         .where(
-            or_(
-                GoogleTrend.fetched_at >= RESEARCH_START.to_pydatetime(),
-                GoogleTrend.fetched_at.is_(None)
-                & (GoogleTrend.published_at >= RESEARCH_START.to_pydatetime()),
-            )
+            # Stored values are canonical naive-UTC strings; compare as text against the UTC instant
+            # at which the research start day begins in Asia/Taipei.
+            type_coerce(func.coalesce(GoogleTrend.published_at, GoogleTrend.fetched_at), String)
+            >= format_db_datetime(taipei_day_start_utc(RESEARCH_START.date()))
         )
     )
     with database_engine().connect() as connection:
@@ -123,7 +129,7 @@ def load_prices(stock_id: str | None = None, start_date: date | None = None) -> 
 
 @st.cache_data(ttl=300)
 def load_theme_history(theme_name: str, lookback_days: int = 365) -> pd.DataFrame:
-    start_date = (pd.Timestamp.now().normalize() - pd.Timedelta(days=lookback_days - 1)).date()
+    start_date = taipei_today() - timedelta(days=lookback_days - 1)
     statement = (
         select(GoogleTrendsHistory)
         .where(
@@ -284,9 +290,8 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
         return pd.DataFrame(columns=columns)
     news = observations[observations["keyword"].isin(keywords)].copy()
     news = news.dropna(subset=["news_id"]).drop_duplicates("news_id")
-    news["date"] = pd.to_datetime(news["fetched_at"], errors="coerce").fillna(
-        pd.to_datetime(news["published_at"], errors="coerce")
-    ).dt.normalize()
+    # Event time is the RSS pubDate (UTC); the business day is its Asia/Taipei calendar date.
+    news["date"] = utc_series_to_taipei_date(news["published_at"].fillna(news["fetched_at"]))
     news["news_sentiment"] = normalize_sentiment(news["news_sentiment"])
     news["sentiment_score"] = pd.to_numeric(news.get("sentiment_score", pd.Series([None] * len(news))), errors="coerce")
     return news.dropna(subset=["date"])[columns]
@@ -376,17 +381,18 @@ def build_market_radar() -> pd.DataFrame:
     mappings = load_theme_mapping_rows()
     observations = load_trend_observations()
     all_prices = load_prices()
+    today = pd.Timestamp(taipei_today())
     rows = []
     for theme_name, definition in themes.items():
         keywords = definition["keywords"]
         stock_ids = definition["stock_ids"]
         history = load_theme_history(theme_name, lookback_days=365)
         history["trend_date"] = pd.to_datetime(history.get("trend_date"), errors="coerce")
-        recent = history[history["trend_date"] >= pd.Timestamp.now().normalize() - pd.Timedelta(days=6)] if not history.empty else history
+        recent = history[history["trend_date"] >= today - pd.Timedelta(days=6)] if not history.empty else history
         previous = history[
             history["trend_date"].between(
-                pd.Timestamp.now().normalize() - pd.Timedelta(days=13),
-                pd.Timestamp.now().normalize() - pd.Timedelta(days=7),
+                today - pd.Timedelta(days=13),
+                today - pd.Timedelta(days=7),
             )
         ] if not history.empty else history
         recent_heat = pd.to_numeric(recent.get("trend_score"), errors="coerce").mean() if not recent.empty else float("nan")
@@ -394,7 +400,7 @@ def build_market_radar() -> pd.DataFrame:
         heat_change = recent_heat / previous_heat - 1 if pd.notna(previous_heat) and previous_heat > 0 else pd.NA
 
         news = prepare_theme_news(observations, keywords)
-        latest_theme_date = history["trend_date"].max().normalize() if not history.empty else pd.Timestamp.now().normalize()
+        latest_theme_date = history["trend_date"].max().normalize() if not history.empty else today
         news = news[news["date"].between(latest_theme_date - pd.Timedelta(days=6), latest_theme_date)]
         sentiment = summarize_sentiment_distribution(news)
         coverage = sentiment["coverage_pct"]
@@ -744,7 +750,7 @@ def main() -> None:
         status = get_system_status(database_engine())
         st.caption(f"資料狀態：{status['health_label']}")
         trend_time = status["latest_trend_at"]
-        st.caption(f"最後更新：{trend_time:%Y-%m-%d %H:%M}" if trend_time else "尚無 Trends 資料")
+        st.caption(f"最後更新：{utc_to_taipei(trend_time):%Y-%m-%d %H:%M}（台北）" if trend_time else "尚無 Trends 資料")
         st.caption(
             f"關鍵字 {int(status['total_keywords']):,}｜新聞 {int(status['total_news']):,}\n\n"
             f"股票行情 {int(status['stock_rows']):,} 筆｜主題 {int(status['theme_count']):,} 個"

@@ -27,11 +27,12 @@ from trends.keyword_auto_classification import (
 )
 from trends.keyword_classification import classify_pending_keywords, classify_pending_news
 from trends.theme_study import sync_theme_mapping
+from trends.timeutil import parse_db_datetime, taipei_date, taipei_today, utc_now, utc_series_to_taipei_date
 
 
 def refresh_theme_daily_stats(engine: Engine, stat_date: date | None = None) -> int:
     db_engine = init_db(engine)
-    target_date = stat_date or date.today()
+    target_date = stat_date or taipei_today()
     with db_engine.connect() as connection:
         mapping = pd.read_sql(
             select(ThemeMapping.theme_name, ThemeMapping.stock_id).where(ThemeMapping.active == 1),
@@ -62,9 +63,7 @@ def refresh_theme_daily_stats(engine: Engine, stat_date: date | None = None) -> 
         if not mapping.empty else pd.Series(dtype=int)
     )
     if not rss.empty:
-        rss["stat_date"] = pd.to_datetime(rss["published_at"], errors="coerce").fillna(
-            pd.to_datetime(rss["fetched_at"], errors="coerce")
-        ).dt.date
+        rss["stat_date"] = utc_series_to_taipei_date(rss["published_at"].fillna(rss["fetched_at"])).dt.date
         rss = rss[rss["stat_date"] == target_date]
     history_groups = {
         str(theme_name): group for theme_name, group in history.groupby("theme_name", sort=False)
@@ -177,16 +176,18 @@ def get_system_status(engine: Engine) -> dict[str, object]:
         latest_stock_date = connection.scalar(select(func.max(Stock.date)))
         latest_theme_stats_date = connection.scalar(select(func.max(ThemeDailyStats.stat_date)))
 
-    now = datetime.now()
-    trend_timestamp = pd.to_datetime(latest_trend_at, errors="coerce") if latest_trend_at else pd.NaT
-    if pd.isna(trend_timestamp) or now - trend_timestamp.to_pydatetime().replace(tzinfo=None) > timedelta(hours=24):
+    # Trend timestamps are naive UTC; day-level freshness is judged on the Asia/Taipei calendar.
+    latest_trend_utc = parse_db_datetime(latest_trend_at)
+    earliest_trend_utc = parse_db_datetime(earliest_trend_at)
+    today = taipei_today()
+    if latest_trend_utc is None or utc_now() - latest_trend_utc > timedelta(hours=24):
         health = "stale"
         health_label = "🔴 超過 24 小時未更新"
     else:
         stock_date = pd.to_datetime(latest_stock_date, errors="coerce") if latest_stock_date else pd.NaT
         stats_date = pd.to_datetime(latest_theme_stats_date, errors="coerce") if latest_theme_stats_date else pd.NaT
-        stock_stale = pd.isna(stock_date) or (now.date() - stock_date.date()).days > 3
-        stats_stale = pd.isna(stats_date) or (now.date() - stats_date.date()).days > 1
+        stock_stale = pd.isna(stock_date) or (today - stock_date.date()).days > 3
+        stats_stale = pd.isna(stats_date) or (today - stats_date.date()).days > 1
         if unclassified_keywords or unanalyzed_news or pending_entities or stock_stale or stats_stale:
             health = "pending"
             health_label = "🟡 部分資料待更新"
@@ -198,10 +199,13 @@ def get_system_status(engine: Engine) -> dict[str, object]:
         timestamp = pd.to_datetime(value, errors="coerce")
         return None if pd.isna(timestamp) else timestamp.strftime("%Y-%m-%d")
 
+    def format_taipei_date(value: datetime | None) -> str | None:
+        return None if value is None else taipei_date(value).isoformat()
+
     return {
         "health": health,
         "health_label": health_label,
-        "latest_trend_at": trend_timestamp.to_pydatetime() if not pd.isna(trend_timestamp) else None,
+        "latest_trend_at": latest_trend_utc,  # naive UTC; convert with timeutil.utc_to_taipei for display
         "unclassified_keywords": int(unclassified_keywords),
         "unanalyzed_news": int(unanalyzed_news),
         "pending_entities": int(pending_entities),
@@ -215,8 +219,8 @@ def get_system_status(engine: Engine) -> dict[str, object]:
         "event_count": int(event_count),
         "latest_stock_date": format_date(latest_stock_date),
         "latest_theme_stats_date": format_date(latest_theme_stats_date),
-        "history_start": format_date(earliest_trend_at),
-        "history_end": format_date(latest_trend_at),
+        "history_start": format_taipei_date(earliest_trend_utc),
+        "history_end": format_taipei_date(latest_trend_utc),
     }
 
 
