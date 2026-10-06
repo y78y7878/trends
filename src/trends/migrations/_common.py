@@ -99,14 +99,22 @@ def row_count(connection: sqlite3.Connection, table: str) -> int:
     return int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
 
 
-def integrity_failures(connection: sqlite3.Connection) -> list[str]:
-    failures = []
+def storage_failures(connection: sqlite3.Connection) -> list[str]:
+    """Page-level corruption only; used to verify that a backup is a faithful, readable copy."""
     integrity = [row[0] for row in connection.execute("PRAGMA integrity_check")]
-    if integrity != ["ok"]:
-        failures.append(f"integrity_check: {integrity[:5]}")
-    foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
-    if foreign_keys:
-        failures.append(f"foreign_key_check: {len(foreign_keys)} violation(s), e.g. {foreign_keys[:3]}")
+    return [] if integrity == ["ok"] else [f"integrity_check: {integrity[:5]}"]
+
+
+def integrity_failures(connection: sqlite3.Connection) -> list[str]:
+    """Storage integrity plus foreign-key consistency; a malformed FK definition is reported, not raised."""
+    failures = storage_failures(connection)
+    try:
+        foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
+    except sqlite3.OperationalError as error:
+        failures.append(f"foreign_key_check: {error} (run p0_0_fix_event_analysis first)")
+    else:
+        if foreign_keys:
+            failures.append(f"foreign_key_check: {len(foreign_keys)} violation(s), e.g. {foreign_keys[:3]}")
     return failures
 
 
@@ -188,10 +196,11 @@ def backup_database(source: str | Path, destination: str | Path) -> str:
         source_connection.close()
     check = connect(destination, readonly=True)
     try:
-        failures = integrity_failures(check)
+        failures = storage_failures(check)
     finally:
         check.close()
     if failures:
+        destination.unlink(missing_ok=True)
         raise MigrationError(f"Backup failed verification: {failures}")
     return sha256_file(destination)
 
