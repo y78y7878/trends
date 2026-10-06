@@ -4,7 +4,12 @@ import unittest
 
 import pandas as pd
 
-from trends.event_study import calculate_event_performance, detect_research_events
+from trends.event_study import (
+    build_event_research_summary,
+    build_event_research_text,
+    calculate_event_performance,
+    detect_research_events,
+)
 
 
 class ResearchEventTests(unittest.TestCase):
@@ -61,6 +66,50 @@ class ResearchEventTests(unittest.TestCase):
         self.assertAlmostEqual(result["return_3d"], 0.03)
         self.assertAlmostEqual(result["max_gain_10d"], 0.20)
         self.assertAlmostEqual(result["max_loss_10d"], -0.09)
+
+    def test_summary_and_narrative_are_generated(self) -> None:
+        performance = pd.DataFrame([
+            {
+                "keyword": "ChatGPT",
+                "event_date": pd.Timestamp("2026-10-02"),
+                "event_heat": 100.0,
+                "heat_change": 1.22,
+                "return_1d": 0.02,
+                "return_3d": 0.052,
+                "return_5d": 0.06,
+                "return_10d": 0.09,
+                "reaction_days": 2,
+                "news_sentiment": "Positive",
+                "stock_id": "2330",
+                "ma20_breakout_day": 2,
+                "ma60_breakout_day": None,
+            },
+            {
+                "keyword": "OpenAI",
+                "event_date": pd.Timestamp("2026-10-03"),
+                "event_heat": 70.0,
+                "heat_change": -0.2,
+                "return_1d": -0.01,
+                "return_3d": -0.04,
+                "return_5d": -0.03,
+                "return_10d": -0.07,
+                "reaction_days": 3,
+                "news_sentiment": "Negative",
+                "stock_id": "2330",
+                "ma20_breakout_day": None,
+                "ma60_breakout_day": None,
+            },
+        ])
+
+        summary = build_event_research_summary(performance)
+        narrative = build_event_research_text(performance.iloc[0], performance)
+
+        self.assertEqual(summary["event_count"], 2)
+        self.assertAlmostEqual(summary["avg_return_1d_pct"], 0.5)
+        self.assertAlmostEqual(summary["avg_return_3d_pct"], 0.6)
+        self.assertIn("符合熱度上升後股價正向反應假說", narrative)
+        self.assertIn("熱度由", narrative)
+        self.assertIn("MA20", narrative)
 
 
 if __name__ == "__main__":

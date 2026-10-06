@@ -21,7 +21,12 @@ from trends.database import (
     get_engine,
     init_db,
 )
-from trends.event_study import calculate_event_performance, detect_research_events
+from trends.event_study import (
+    build_event_research_summary,
+    build_event_research_text,
+    calculate_event_performance,
+    detect_research_events,
+)
 from trends.etl import get_system_status, run_full_update
 from trends.theme_study import build_theme_definitions, sync_theme_mapping
 
@@ -146,6 +151,41 @@ def clear_dashboard_caches() -> None:
 
 def show_empty(message: str) -> None:
     st.info(message)
+
+
+def summarize_sentiment_distribution(news: pd.DataFrame) -> dict[str, float]:
+    if news.empty or "news_sentiment" not in news.columns:
+        return {"positive_pct": 0.0, "neutral_pct": 0.0, "negative_pct": 0.0}
+    sentiment = news["news_sentiment"].fillna("Neutral").str.title()
+    counts = sentiment.value_counts(normalize=True) * 100
+    distribution = {
+        "positive_pct": float(counts.get("Positive", 0.0)),
+        "neutral_pct": float(counts.get("Neutral", 0.0)),
+        "negative_pct": float(counts.get("Negative", 0.0)),
+    }
+    return distribution
+
+
+def format_summary_value(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    if isinstance(value, float):
+        return f"{value:.1f}"
+    return str(value)
+
+
+def format_event_table_value(value: object, column_name: str | None = None) -> str:
+    if value is None or pd.isna(value):
+        return "資料尚不足" if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")) else "N/A"
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d")
+    if isinstance(value, (float, int)):
+        if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")):
+            return f"{float(value):.2%}"
+        if column_name == "事件熱度":
+            return f"{float(value):.0f}"
+        return str(value)
+    return str(value)
 
 
 def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
@@ -401,6 +441,8 @@ def page_event_study() -> None:
             axis=1,
         )
     performance = calculate_event_performance(triggers, prices)
+    summary = build_event_research_summary(performance)
+    sentiment_distribution = summarize_sentiment_distribution(news)
 
     prices["date"] = pd.to_datetime(prices["date"], errors="coerce").dt.normalize()
     prices = prices.sort_values("date").copy()
@@ -472,24 +514,72 @@ def page_event_study() -> None:
     st.plotly_chart(figure, width="stretch")
     st.caption("垂直虛線標示最近 12 個不同事件日；事件績效表保留所選期間的全部事件。新聞點顏色代表情緒；股價與熱度使用不同座標軸。")
 
-    st.subheader("事件績效")
+    st.subheader("研究結果摘要卡")
+    summary_items = [
+        ("事件數量", summary["event_count"]),
+        ("正報酬比例", summary["positive_return_ratio_pct"]),
+        ("負報酬比例", summary["negative_return_ratio_pct"]),
+        ("平均反應時間", summary["avg_reaction_days"]),
+        ("最佳事件", summary["best_event"]),
+        ("最差事件", summary["worst_event"]),
+        ("平均1日報酬", summary["avg_return_1d_pct"]),
+        ("平均3日報酬", summary["avg_return_3d_pct"]),
+        ("平均5日報酬", summary["avg_return_5d_pct"]),
+        ("平均10日報酬", summary["avg_return_10d_pct"]),
+    ]
+    metric_cols = st.columns(3)
+    for index, (label, value) in enumerate(summary_items):
+        with metric_cols[index % 3]:
+            rendered = format_summary_value(value)
+            if isinstance(value, (int, float)) and not pd.isna(value):
+                rendered = f"{value:.1f}%" if label.startswith("平均") or label.endswith("比例") else str(int(value)) if label == "事件數量" else f"{value:.1f}日"
+            st.metric(label, rendered)
+
+    st.subheader("情緒分析驗證")
+    if not news.empty:
+        sentiment_cols = st.columns(3)
+        with sentiment_cols[0]:
+            st.metric("Positive %", f"{sentiment_distribution['positive_pct']:.1f}%")
+        with sentiment_cols[1]:
+            st.metric("Neutral %", f"{sentiment_distribution['neutral_pct']:.1f}%")
+        with sentiment_cols[2]:
+            st.metric("Negative %", f"{sentiment_distribution['negative_pct']:.1f}%")
+        if sentiment_distribution["neutral_pct"] > 80:
+            st.warning("Neutral 占比超過 80%，請檢查情緒分析流程是否失效、是否僅使用英文模型、是否新聞內容未正確傳入分析模組。")
+    else:
+        st.info("目前此範圍內沒有可驗證的新聞情緒資料。")
+
+    st.subheader("事件解讀")
     if performance.empty:
         show_empty("此條件下沒有符合事件門檻且可配對行情的事件。")
         return
+
+    event_options = performance.sort_values("event_date", ascending=False).copy()
+    event_options["label"] = event_options.apply(
+        lambda row: f"{row['keyword']} ({pd.to_datetime(row['event_date']).strftime('%Y-%m-%d')})",
+        axis=1,
+    )
+    selected_label = st.selectbox("選擇事件", event_options["label"].tolist(), index=0, key="event_summary_selection")
+    selected_event = event_options[event_options["label"].eq(selected_label)].iloc[0]
+    st.info(build_event_research_text(selected_event, performance))
+
+    st.subheader("事件績效")
     display = performance.rename(columns={
         "event_date": "事件日期", "keyword": "關鍵字", "theme": "主題", "stock_id": "股票",
         "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
-    })
-    columns = [
+        "reaction_days": "反應天數",
+        "ma20_breakout_day": "MA20突破日",
+        "ma60_breakout_day": "MA60突破日",
+    }).copy()
+    for column in display.columns:
+        display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
+    display = display[[
         "事件日期", "關鍵字", "主題", "股票", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
-        "5日報酬", "10日報酬", "最大漲幅", "最大跌幅",
-    ]
-    st.dataframe(display[columns], column_config={
-        column: st.column_config.NumberColumn(format="percent")
-        for column in ("1日報酬", "3日報酬", "5日報酬", "10日報酬", "最大漲幅", "最大跌幅")
-    }, hide_index=True)
+        "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "反應天數", "MA20突破日", "MA60突破日",
+    ]]
+    st.dataframe(display, hide_index=True)
 
 
 def main() -> None:
