@@ -293,12 +293,19 @@ def build_event_research_summary(performance: pd.DataFrame) -> dict[str, float |
     return summary
 
 
+def _format_metric(value: object, suffix: str) -> str:
+    if value is None or pd.isna(value):
+        return "資料不足"
+    return f"{float(value):.1f}{suffix}"
+
+
 def build_event_research_overview(theme_name: str, start_date: date | pd.Timestamp, end_date: date | pd.Timestamp, performance: pd.DataFrame) -> str:
     if performance.empty:
         return f"{theme_name}事件研究：目前沒有足夠事件樣本，無法形成有說服力的市場反應結論。"
     summary = build_event_research_summary(performance)
     avg_10d = summary.get("avg_return_10d_pct")
     positive_ratio = summary.get("positive_return_ratio_pct")
+    negative_ratio = summary.get("negative_return_ratio_pct")
     avg_reaction = summary.get("avg_reaction_days")
     if avg_10d is None:
         conclusion = "目前資料不足，無法穩定判斷事件與股價後續關聯。"
@@ -315,13 +322,13 @@ def build_event_research_overview(theme_name: str, start_date: date | pd.Timesta
         f"{theme_name}事件研究\n"
         f"研究期間：{start_label} ~ {end_label}\n"
         f"事件數量：{summary['event_count']}\n"
-        f"正報酬事件：{positive_ratio:.1f}%\n"
-        f"負報酬事件：{100 - positive_ratio:.1f}%\n"
-        f"平均反應時間：{avg_reaction:.1f} 天\n"
-        f"平均1日報酬：{summary['avg_return_1d_pct']:.1f}%\n"
-        f"平均3日報酬：{summary['avg_return_3d_pct']:.1f}%\n"
-        f"平均5日報酬：{summary['avg_return_5d_pct']:.1f}%\n"
-        f"平均10日報酬：{summary['avg_return_10d_pct']:.1f}%\n\n"
+        f"正報酬事件：{_format_metric(positive_ratio, '%')}\n"
+        f"負報酬事件：{_format_metric(negative_ratio, '%')}\n"
+        f"平均首次反應天數：{_format_metric(avg_reaction, ' 天')}\n"
+        f"平均1日報酬：{_format_metric(summary['avg_return_1d_pct'], '%')}\n"
+        f"平均3日報酬：{_format_metric(summary['avg_return_3d_pct'], '%')}\n"
+        f"平均5日報酬：{_format_metric(summary['avg_return_5d_pct'], '%')}\n"
+        f"平均10日報酬：{_format_metric(summary['avg_return_10d_pct'], '%')}\n\n"
         f"AI結論：{conclusion}"
     )
 
@@ -393,7 +400,7 @@ def build_hypothesis_validation(performance: pd.DataFrame) -> list[dict[str, str
             validations.append({
                 "title": "假說3：不同主題存在不同市場反應速度。",
                 "status": "資料不足",
-                "basis": "主題層級反應時間不足，無法判斷主題差異。",
+                "basis": "主題層級首次反應天數不足，無法判斷主題差異。",
             })
     else:
         validations.append({

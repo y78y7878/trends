@@ -183,6 +183,9 @@ def format_event_table_value(value: object, column_name: str | None = None) -> s
         return "資料尚不足" if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")) else "N/A"
     if isinstance(value, pd.Timestamp):
         return value.strftime("%Y-%m-%d")
+    if column_name == "首次反應天數":
+        days = pd.to_numeric(value, errors="coerce")
+        return f"{int(days)} 天" if pd.notna(days) else "資料尚不足"
     if isinstance(value, (float, int)):
         if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")):
             if column_name in {"MA20突破日", "MA60突破日"}:
@@ -401,7 +404,7 @@ def build_market_radar() -> pd.DataFrame:
             "中性": neutral,
             "負面": negative,
             "相關股票": ", ".join(stock_ids),
-            "平均反應時間": average_reaction,
+            "平均首次反應天數": average_reaction,
             "近 10 日表現": return_10d,
         })
     return pd.DataFrame(rows)
@@ -414,7 +417,7 @@ def page_market_radar() -> None:
     if radar.empty:
         show_empty("尚無主題映射資料，請確認 theme_mapping.csv。")
         return
-    st.caption("熱度變化比較最近 7 日與前 7 日平均；近 10 日表現為主題關聯股票等權平均。平均反應時間估算取每主題最近最多 50 個事件、每個關鍵字一檔映射股票，以事件後 10 個交易日內累積報酬絕對值最大的日期作為觀察代理值。")
+    st.caption("熱度變化比較最近 7 日與前 7 日平均；近 10 日表現為主題關聯股票等權平均。平均首次反應天數取每主題最近最多 50 個事件、每個關鍵字一檔映射股票；首次反應天數為事件後 1–30 個交易日內，收盤價相對事件日收盤首次變動達 ±1% 的交易日數，僅作為描述性觀察指標。")
     st.dataframe(
         radar,
         column_config={
@@ -579,7 +582,7 @@ def page_event_study() -> None:
         ("事件數量", summary["event_count"]),
         ("正報酬比例", summary["positive_return_ratio_pct"]),
         ("負報酬比例", summary["negative_return_ratio_pct"]),
-        ("平均反應時間", summary["avg_reaction_days"]),
+        ("平均首次反應天數", summary["avg_reaction_days"]),
         ("最佳事件", summary["best_event"]),
         ("最差事件", summary["worst_event"]),
         ("平均1日報酬", summary["avg_return_1d_pct"]),
@@ -594,7 +597,7 @@ def page_event_study() -> None:
             if isinstance(value, (int, float)) and not pd.isna(value):
                 if label in {"事件數量"}:
                     rendered = str(int(value))
-                elif label in {"平均反應時間"}:
+                elif label in {"平均首次反應天數"}:
                     rendered = f"{float(value):.1f} 天"
                 elif label.startswith("平均") or label.endswith("比例"):
                     rendered = f"{float(value):.1f}%"
@@ -641,7 +644,7 @@ def page_event_study() -> None:
 
     st.subheader("Data Quality Check")
     quality = build_data_quality_check(performance, news)
-    st.metric("有效反應天數比例", f"{quality['reaction_days_valid_pct']:.1f}%")
+    st.metric("有效首次反應天數比例", f"{quality['reaction_days_valid_pct']:.1f}%")
     if quality["sentiment_warning"]:
         st.warning("情緒分析可能異常：Neutral 佔比超過 80%，請檢查中文新聞是否正確送入情緒模型。")
     if quality["ma20_warning"] or quality["ma60_warning"]:
@@ -653,7 +656,7 @@ def page_event_study() -> None:
         "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
-        "reaction_days": "反應天數",
+        "reaction_days": "首次反應天數",
         "ma20_breakout_day": "MA20突破日",
         "ma60_breakout_day": "MA60突破日",
     }).copy()
@@ -661,7 +664,7 @@ def page_event_study() -> None:
         display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
     display = display[[
         "事件日期", "關鍵字", "主題", "股票", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
-        "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "反應天數", "MA20突破日", "MA60突破日",
+        "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
     ]]
     st.dataframe(display, hide_index=True)
 

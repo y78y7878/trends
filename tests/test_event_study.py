@@ -5,6 +5,7 @@ import unittest
 import pandas as pd
 
 from trends.event_study import (
+    build_event_research_overview,
     build_event_research_summary,
     build_event_research_text,
     calculate_event_performance,
@@ -110,6 +111,73 @@ class ResearchEventTests(unittest.TestCase):
         self.assertIn("符合熱度上升後股價正向反應假說", narrative)
         self.assertIn("熱度由", narrative)
         self.assertIn("MA20", narrative)
+
+
+def _performance(rows: list[dict[str, object]]) -> pd.DataFrame:
+    defaults = {
+        "keyword": "AI",
+        "event_date": pd.Timestamp("2026-10-01"),
+        "return_1d": pd.NA,
+        "return_3d": pd.NA,
+        "return_5d": pd.NA,
+        "return_10d": pd.NA,
+        "reaction_days": pd.NA,
+    }
+    return pd.DataFrame([{**defaults, **row} for row in rows])
+
+
+class ResearchOverviewTests(unittest.TestCase):
+    def overview(self, performance: pd.DataFrame) -> str:
+        return build_event_research_overview(
+            "科技類", pd.Timestamp("2026-09-01"), pd.Timestamp("2026-10-06"), performance
+        )
+
+    def test_missing_ten_day_returns_show_insufficient_data(self) -> None:
+        text = self.overview(_performance([
+            {"return_1d": 0.01, "reaction_days": 2},
+            {"return_1d": -0.02, "reaction_days": 4},
+        ]))
+
+        self.assertIn("正報酬事件：資料不足", text)
+        self.assertIn("負報酬事件：資料不足", text)
+        self.assertIn("平均10日報酬：資料不足", text)
+        self.assertIn("平均1日報酬：-0.5%", text)
+        self.assertIn("平均首次反應天數：3.0 天", text)
+
+    def test_missing_reaction_days_show_insufficient_data(self) -> None:
+        text = self.overview(_performance([
+            {"return_1d": 0.01, "return_3d": 0.02, "return_5d": 0.03, "return_10d": 0.04},
+        ]))
+
+        self.assertIn("平均首次反應天數：資料不足", text)
+        self.assertIn("平均10日報酬：4.0%", text)
+
+    def test_single_event_without_any_returns_does_not_raise(self) -> None:
+        text = self.overview(_performance([{}]))
+
+        self.assertIn("事件數量：1", text)
+        for label in ("平均1日報酬", "平均3日報酬", "平均5日報酬", "平均10日報酬", "平均首次反應天數"):
+            self.assertIn(f"{label}：資料不足", text)
+
+    def test_negative_ratio_excludes_zero_returns(self) -> None:
+        text = self.overview(_performance([
+            {"return_10d": 0.05},
+            {"return_10d": 0.0},
+            {"return_10d": -0.02},
+        ]))
+
+        self.assertIn("正報酬事件：33.3%", text)
+        self.assertIn("負報酬事件：33.3%", text)
+
+
+class EventTableFormatTests(unittest.TestCase):
+    def test_first_reaction_days_render_as_days(self) -> None:
+        from trends.dashboard import format_event_table_value
+
+        self.assertEqual(format_event_table_value(2, "首次反應天數"), "2 天")
+        self.assertEqual(format_event_table_value(3.0, "首次反應天數"), "3 天")
+        self.assertEqual(format_event_table_value(pd.NA, "首次反應天數"), "資料尚不足")
+        self.assertEqual(format_event_table_value(0.05, "10日報酬"), "5.00%")
 
 
 if __name__ == "__main__":
