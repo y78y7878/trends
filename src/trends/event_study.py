@@ -268,12 +268,13 @@ def build_event_research_summary(performance: pd.DataFrame) -> dict[str, float |
         "worst_event": "N/A",
     }
 
-    returns_3d = pd.to_numeric(performance.get("return_3d", pd.Series(dtype=float)), errors="coerce").dropna()
-    if not returns_3d.empty:
-        summary["positive_return_ratio_pct"] = float((returns_3d > 0).mean() * 100)
-        summary["negative_return_ratio_pct"] = float((returns_3d < 0).mean() * 100)
+    returns_10d = pd.to_numeric(performance.get("return_10d", pd.Series(dtype=float)), errors="coerce").dropna()
+    if not returns_10d.empty:
+        summary["positive_return_ratio_pct"] = float((returns_10d > 0).mean() * 100)
+        summary["negative_return_ratio_pct"] = float((returns_10d < 0).mean() * 100)
 
     reaction_days = pd.to_numeric(performance.get("reaction_days", pd.Series(dtype=float)), errors="coerce").dropna()
+    reaction_days = reaction_days[(reaction_days >= 0) & (reaction_days <= 30)]
     if not reaction_days.empty:
         summary["avg_reaction_days"] = float(reaction_days.mean())
 
@@ -289,11 +290,128 @@ def build_event_research_summary(performance: pd.DataFrame) -> dict[str, float |
         returns = pd.to_numeric(performance.get(column, pd.Series(dtype=float)), errors="coerce").dropna()
         suffix = column.replace("return_", "")
         summary[f"avg_return_{suffix}_pct"] = float(returns.mean() * 100) if not returns.empty else None
-    summary["avg_return_1d_pct"] = summary.get("avg_return_1d_pct")
-    summary["avg_return_3d_pct"] = summary.get("avg_return_3d_pct")
-    summary["avg_return_5d_pct"] = summary.get("avg_return_5d_pct")
-    summary["avg_return_10d_pct"] = summary.get("avg_return_10d_pct")
     return summary
+
+
+def build_event_research_overview(theme_name: str, start_date: date | pd.Timestamp, end_date: date | pd.Timestamp, performance: pd.DataFrame) -> str:
+    if performance.empty:
+        return f"{theme_name}事件研究：目前沒有足夠事件樣本，無法形成有說服力的市場反應結論。"
+    summary = build_event_research_summary(performance)
+    avg_10d = summary.get("avg_return_10d_pct")
+    positive_ratio = summary.get("positive_return_ratio_pct")
+    avg_reaction = summary.get("avg_reaction_days")
+    if avg_10d is None:
+        conclusion = "目前資料不足，無法穩定判斷事件與股價後續關聯。"
+    elif avg_10d > 0:
+        conclusion = f"{theme_name}熱門事件與股價存在輕度正向關聯，事件後 10 日平均表現呈現正值。"
+    elif avg_10d < 0:
+        conclusion = f"{theme_name}熱門事件在本期間內未呈現明顯正向關聯，後續股價反應偏弱或負向。"
+    else:
+        conclusion = f"{theme_name}熱門事件在本期間內的價格反應接近中性，表示事件影響較弱。"
+
+    start_label = pd.Timestamp(start_date).strftime("%Y-%m-%d") if not isinstance(start_date, str) else str(start_date)
+    end_label = pd.Timestamp(end_date).strftime("%Y-%m-%d") if not isinstance(end_date, str) else str(end_date)
+    return (
+        f"{theme_name}事件研究\n"
+        f"研究期間：{start_label} ~ {end_label}\n"
+        f"事件數量：{summary['event_count']}\n"
+        f"正報酬事件：{positive_ratio:.1f}%\n"
+        f"負報酬事件：{100 - positive_ratio:.1f}%\n"
+        f"平均反應時間：{avg_reaction:.1f} 天\n"
+        f"平均1日報酬：{summary['avg_return_1d_pct']:.1f}%\n"
+        f"平均3日報酬：{summary['avg_return_3d_pct']:.1f}%\n"
+        f"平均5日報酬：{summary['avg_return_5d_pct']:.1f}%\n"
+        f"平均10日報酬：{summary['avg_return_10d_pct']:.1f}%\n\n"
+        f"AI結論：{conclusion}"
+    )
+
+
+def build_hypothesis_validation(performance: pd.DataFrame) -> list[dict[str, str | float | int]]:
+    validations: list[dict[str, str | float | int]] = []
+    if performance.empty:
+        return []
+
+    ten_day_returns = pd.to_numeric(performance.get("return_10d", pd.Series(dtype=float)), errors="coerce").dropna()
+    positive_ratio = (ten_day_returns.gt(0).mean() * 100) if not ten_day_returns.empty else 0.0
+    if ten_day_returns.empty:
+        status = "資料不足"
+        reason = "10日報酬樣本不足。"
+    elif positive_ratio >= 55:
+        status = "成立"
+        reason = f"{len(performance)} 個事件中，{positive_ratio:.1f}% 於 10 日內產生正報酬。"
+    elif positive_ratio >= 40:
+        status = "部分成立"
+        reason = f"{len(performance)} 個事件中，{positive_ratio:.1f}% 於 10 日內產生正報酬。"
+    else:
+        status = "不成立"
+        reason = f"{len(performance)} 個事件中，{positive_ratio:.1f}% 於 10 日內產生正報酬。"
+    validations.append({
+        "title": "假說1：當搜尋熱度顯著提升時，股票較容易出現正報酬。",
+        "status": status,
+        "basis": reason,
+    })
+
+    positive_count = int((performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title() == "Positive").sum())
+    negative_count = int((performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title() == "Negative").sum())
+    if positive_count < 5 and negative_count < 5:
+        validations.append({
+            "title": "假說2：正面新聞影響大於負面新聞。",
+            "status": "資料不足",
+            "basis": "Positive 與 Negative 樣本數均不足，無法比較不同情緒的市場效應。",
+        })
+    else:
+        positive_group = performance[performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title().eq("Positive")]
+        negative_group = performance[performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title().eq("Negative")]
+        pos_mean = positive_group["return_10d"].mean() if not positive_group.empty else float("nan")
+        neg_mean = negative_group["return_10d"].mean() if not negative_group.empty else float("nan")
+        if pd.isna(pos_mean) or pd.isna(neg_mean):
+            status = "資料不足"
+            basis = "Positive 或 Negative 樣本數不足。"
+        elif pos_mean > neg_mean:
+            status = "成立"
+            basis = f"Positive 事件平均 10 日報酬為 {pos_mean * 100:.1f}%；Negative 事件平均 10 日報酬為 {neg_mean * 100:.1f}% 。"
+        else:
+            status = "不成立"
+            basis = f"Positive 事件平均 10 日報酬為 {pos_mean * 100:.1f}%；Negative 事件平均 10 日報酬為 {neg_mean * 100:.1f}% 。"
+        validations.append({
+            "title": "假說2：正面新聞影響大於負面新聞。",
+            "status": status,
+            "basis": basis,
+        })
+
+    if "theme" in performance.columns and performance["theme"].notna().any():
+        grouped = performance.groupby("theme")["reaction_days"].apply(lambda values: pd.to_numeric(values, errors="coerce").dropna()[(pd.to_numeric(values, errors="coerce").dropna() >= 0) & (pd.to_numeric(values, errors="coerce").dropna() <= 30)].mean())
+        themes = grouped.sort_values().dropna()
+        if not themes.empty:
+            theme_text = ", ".join(f"{name}：{value:.0f}天" for name, value in themes.items())
+            validations.append({
+                "title": "假說3：不同主題存在不同市場反應速度。",
+                "status": "成立",
+                "basis": theme_text,
+            })
+        else:
+            validations.append({
+                "title": "假說3：不同主題存在不同市場反應速度。",
+                "status": "資料不足",
+                "basis": "主題層級反應時間不足，無法判斷主題差異。",
+            })
+    else:
+        validations.append({
+            "title": "假說3：不同主題存在不同市場反應速度。",
+            "status": "資料不足",
+            "basis": "本視角未含主題分層資料，無法比較主題差異。",
+        })
+
+    return validations
+
+
+def normalize_breakout_day(value: object) -> str:
+    if value is None or pd.isna(value):
+        return "N/A"
+    day_value = int(float(value))
+    if day_value == 0:
+        return "Day0"
+    return f"{day_value}"
 
 
 def build_event_research_text(event: pd.Series | dict[str, object], performance: pd.DataFrame) -> str:
@@ -335,13 +453,13 @@ def build_event_research_text(event: pd.Series | dict[str, object], performance:
     ma20_day = pd.to_numeric(event_row.get("ma20_breakout_day"), errors="coerce")
     ma60_day = pd.to_numeric(event_row.get("ma60_breakout_day"), errors="coerce")
     if pd.notna(ma20_day):
-        ma20_text = f"事件後第{int(ma20_day)}日突破MA20。"
+        ma20_text = f"事件後第{normalize_breakout_day(ma20_day)}日突破MA20。" if int(float(ma20_day)) != 0 else "事件當天突破MA20。"
     elif "ma20" in event_row and pd.notna(event_row.get("ma20")):
         ma20_text = "事件後已突破MA20。"
     else:
         ma20_text = "事件後未出現 MA20 突破訊號。"
     if pd.notna(ma60_day):
-        ma60_text = f"事件後第{int(ma60_day)}日突破MA60。"
+        ma60_text = f"事件後第{normalize_breakout_day(ma60_day)}日突破MA60。" if int(float(ma60_day)) != 0 else "事件當天突破MA60。"
     elif "ma60" in event_row and pd.notna(event_row.get("ma60")):
         ma60_text = "事件後已突破MA60。"
     else:
@@ -490,29 +608,38 @@ def calculate_event_performance(events: pd.DataFrame, prices: pd.DataFrame) -> p
         result["max_loss_10d"] = future_prices["low"].min() / base_close - 1 if future_prices["low"].notna().any() else pd.NA
         result["ma20_breakout_day"] = pd.NA
         result["ma60_breakout_day"] = pd.NA
-        for offset in range(0, min(10, len(stock_prices) - position) + 1):
+        for offset in range(0, min(30, len(stock_prices) - position) + 1):
             current_index = position + offset
             if current_index >= len(stock_prices):
                 break
             current_row = stock_prices.iloc[current_index]
             previous_index = current_index - 1
             previous_row = stock_prices.iloc[previous_index] if previous_index >= 0 else None
-            if previous_row is None:
+            if previous_row is None and current_index == position:
+                if current_row["close"] > current_row["ma20"]:
+                    result["ma20_breakout_day"] = 0
+                if current_row["close"] > current_row["ma60"]:
+                    result["ma60_breakout_day"] = 0
                 continue
-            if current_row["close"] > current_row["ma20"] and previous_row["close"] <= previous_row["ma20"]:
-                if pd.isna(result["ma20_breakout_day"]):
+            if previous_row is not None:
+                if pd.isna(result["ma20_breakout_day"]) and current_row["close"] > current_row["ma20"] and previous_row["close"] <= previous_row["ma20"]:
                     result["ma20_breakout_day"] = offset
-            if current_row["close"] > current_row["ma60"] and previous_row["close"] <= previous_row["ma60"]:
-                if pd.isna(result["ma60_breakout_day"]):
+                if pd.isna(result["ma60_breakout_day"]) and current_row["close"] > current_row["ma60"] and previous_row["close"] <= previous_row["ma60"]:
                     result["ma60_breakout_day"] = offset
             if not pd.isna(result["ma20_breakout_day"]) and not pd.isna(result["ma60_breakout_day"]):
                 break
-        future_closes = future_prices["close"].dropna()
-        if future_closes.empty:
-            result["reaction_days"] = pd.NA
-        else:
-            cumulative_returns = future_closes.div(base_close).sub(1)
-            result["reaction_days"] = int(cumulative_returns.abs().idxmax() - position)
+
+        future_closes = stock_prices.iloc[position + 1:position + 31]["close"].dropna()
+        reaction_days = pd.NA
+        if not future_closes.empty:
+            daily_returns = future_closes.div(base_close).sub(1)
+            significant = daily_returns.abs().ge(0.01)
+            if significant.any():
+                first_signal = significant.idxmax()
+                reaction_days = int(first_signal - position)
+            if reaction_days is not pd.NA and reaction_days > 30:
+                reaction_days = pd.NA
+        result["reaction_days"] = reaction_days
         output.append(result)
 
     return pd.DataFrame(output, columns=columns)

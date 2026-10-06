@@ -22,10 +22,13 @@ from trends.database import (
     init_db,
 )
 from trends.event_study import (
+    build_event_research_overview,
     build_event_research_summary,
     build_event_research_text,
+    build_hypothesis_validation,
     calculate_event_performance,
     detect_research_events,
+    normalize_breakout_day,
 )
 from trends.etl import get_system_status, run_full_update
 from trends.theme_study import build_theme_definitions, sync_theme_mapping
@@ -82,6 +85,7 @@ def load_trend_observations() -> pd.DataFrame:
             GoogleTrendNews.news_url,
             GoogleTrendNews.news_source,
             GoogleTrendNews.news_sentiment,
+            GoogleTrendNews.sentiment_score,
             GoogleTrendNews.event_type,
             KeywordClassification.canonical_keyword,
             KeywordClassification.theme_name.label("classification_theme"),
@@ -181,15 +185,65 @@ def format_event_table_value(value: object, column_name: str | None = None) -> s
         return value.strftime("%Y-%m-%d")
     if isinstance(value, (float, int)):
         if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")):
+            if column_name in {"MA20突破日", "MA60突破日"}:
+                return normalize_breakout_day(value)
             return f"{float(value):.2%}"
         if column_name == "事件熱度":
             return f"{float(value):.0f}"
+        if column_name in {"MA20突破日", "MA60突破日"}:
+            return normalize_breakout_day(value)
         return str(value)
     return str(value)
 
 
+def build_sentiment_verification_sample(news: pd.DataFrame) -> pd.DataFrame:
+    if news.empty:
+        return pd.DataFrame(columns=["新聞標題", "新聞摘要", "情緒標籤", "信心分數", "分析模型", "分析時間"])
+    sample = news[["news_title", "news_source", "news_sentiment", "sentiment_score", "date"]].copy()
+    sample = sample.rename(columns={
+        "news_title": "新聞標題",
+        "news_source": "新聞來源",
+        "news_sentiment": "情緒標籤",
+        "sentiment_score": "信心分數",
+        "date": "分析時間",
+    })
+    sample["新聞摘要"] = sample["新聞標題"].fillna("新聞內容未提供")
+    sample["分析模型"] = "Gemini 3.6 Flash（中文新聞情緒分類）"
+    sample["分析時間"] = pd.to_datetime(sample["分析時間"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return sample[["新聞標題", "新聞摘要", "情緒標籤", "信心分數", "分析模型", "分析時間"]].head(20)
+
+
+def build_data_quality_check(performance: pd.DataFrame, news: pd.DataFrame) -> dict[str, object]:
+    metrics = {
+        "positive_pct": 0.0,
+        "neutral_pct": 0.0,
+        "negative_pct": 0.0,
+        "reaction_days_valid_pct": 100.0,
+        "ma20_warning": False,
+        "ma60_warning": False,
+        "sentiment_warning": False,
+    }
+    if not news.empty and "news_sentiment" in news.columns:
+        sentiment = news["news_sentiment"].fillna("Neutral").str.title()
+        counts = sentiment.value_counts(normalize=True) * 100
+        metrics["positive_pct"] = float(counts.get("Positive", 0.0))
+        metrics["neutral_pct"] = float(counts.get("Neutral", 0.0))
+        metrics["negative_pct"] = float(counts.get("Negative", 0.0))
+        if metrics["neutral_pct"] > 80:
+            metrics["sentiment_warning"] = True
+    if not performance.empty:
+        reaction_days = pd.to_numeric(performance.get("reaction_days", pd.Series(dtype=float)), errors="coerce")
+        valid = reaction_days.dropna().between(0, 30)
+        metrics["reaction_days_valid_pct"] = float(valid.mean() * 100) if not reaction_days.empty else 100.0
+        ma20 = pd.to_numeric(performance.get("ma20_breakout_day", pd.Series(dtype=float)), errors="coerce")
+        ma60 = pd.to_numeric(performance.get("ma60_breakout_day", pd.Series(dtype=float)), errors="coerce")
+        metrics["ma20_warning"] = bool(ma20.dropna().mode().size and ma20.dropna().value_counts().max() / len(ma20.dropna()) > 0.35)
+        metrics["ma60_warning"] = bool(ma60.dropna().mode().size and ma60.dropna().value_counts().max() / len(ma60.dropna()) > 0.35)
+    return metrics
+
+
 def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
-    columns = ["date", "keyword", "news_id", "news_title", "news_source", "news_url", "news_sentiment"]
+    columns = ["date", "keyword", "news_id", "news_title", "news_source", "news_url", "news_sentiment", "sentiment_score"]
     if observations.empty or not keywords:
         return pd.DataFrame(columns=columns)
     news = observations[observations["keyword"].isin(keywords)].copy()
@@ -198,6 +252,7 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
         pd.to_datetime(news["published_at"], errors="coerce")
     ).dt.normalize()
     news["news_sentiment"] = news["news_sentiment"].fillna("Neutral").str.title()
+    news["sentiment_score"] = pd.to_numeric(news.get("sentiment_score", pd.Series([None] * len(news))), errors="coerce")
     return news.dropna(subset=["date"])[columns]
 
 
@@ -512,9 +567,14 @@ def page_event_study() -> None:
     figure.update_yaxes(title_text="股價與均線", secondary_y=False)
     figure.update_yaxes(title_text="搜尋熱度（0–100）", range=[0, 110], secondary_y=True)
     st.plotly_chart(figure, width="stretch")
-    st.caption("垂直虛線標示最近 12 個不同事件日；事件績效表保留所選期間的全部事件。新聞點顏色代表情緒；股價與熱度使用不同座標軸。")
+    st.caption("本研究目的是驗證熱門事件是否會影響後續股價反應，而不是預測交易訊號。垂直虛線標示事件日，新聞點顏色代表情緒，股價與熱度使用不同座標軸。")
 
-    st.subheader("研究結果摘要卡")
+    if performance.empty:
+        show_empty("此條件下沒有符合事件門檻且可配對行情的事件。")
+        return
+
+    st.subheader("研究結果摘要")
+    st.markdown(build_event_research_overview(theme_name, start_date, end_date, performance))
     summary_items = [
         ("事件數量", summary["event_count"]),
         ("正報酬比例", summary["positive_return_ratio_pct"]),
@@ -532,8 +592,20 @@ def page_event_study() -> None:
         with metric_cols[index % 3]:
             rendered = format_summary_value(value)
             if isinstance(value, (int, float)) and not pd.isna(value):
-                rendered = f"{value:.1f}%" if label.startswith("平均") or label.endswith("比例") else str(int(value)) if label == "事件數量" else f"{value:.1f}日"
+                if label in {"事件數量"}:
+                    rendered = str(int(value))
+                elif label in {"平均反應時間"}:
+                    rendered = f"{float(value):.1f} 天"
+                elif label.startswith("平均") or label.endswith("比例"):
+                    rendered = f"{float(value):.1f}%"
             st.metric(label, rendered)
+
+    st.subheader("Hypothesis Validation")
+    for hypothesis in build_hypothesis_validation(performance):
+        status_color = "green" if hypothesis["status"] == "成立" else "orange" if hypothesis["status"] == "部分成立" else "red" if hypothesis["status"] == "不成立" else "gray"
+        st.markdown(f"### {hypothesis['title']}")
+        st.markdown(f"**驗證結果：** <span style='color:{status_color};font-weight:700'>{hypothesis['status']}</span>", unsafe_allow_html=True)
+        st.markdown(f"**依據：** {hypothesis['basis']}")
 
     st.subheader("情緒分析驗證")
     if not news.empty:
@@ -546,14 +618,12 @@ def page_event_study() -> None:
             st.metric("Negative %", f"{sentiment_distribution['negative_pct']:.1f}%")
         if sentiment_distribution["neutral_pct"] > 80:
             st.warning("Neutral 占比超過 80%，請檢查情緒分析流程是否失效、是否僅使用英文模型、是否新聞內容未正確傳入分析模組。")
+        sentiment_table = build_sentiment_verification_sample(news)
+        st.dataframe(sentiment_table, hide_index=True)
     else:
         st.info("目前此範圍內沒有可驗證的新聞情緒資料。")
 
     st.subheader("事件解讀")
-    if performance.empty:
-        show_empty("此條件下沒有符合事件門檻且可配對行情的事件。")
-        return
-
     event_options = performance.sort_values("event_date", ascending=False).copy()
     event_options["label"] = event_options.apply(
         lambda row: f"{row['keyword']} ({pd.to_datetime(row['event_date']).strftime('%Y-%m-%d')})",
@@ -562,6 +632,20 @@ def page_event_study() -> None:
     selected_label = st.selectbox("選擇事件", event_options["label"].tolist(), index=0, key="event_summary_selection")
     selected_event = event_options[event_options["label"].eq(selected_label)].iloc[0]
     st.info(build_event_research_text(selected_event, performance))
+
+    st.subheader("事件研究結論")
+    st.markdown(
+        "本頁面聚焦於研究問題：熱門事件是否會改變市場對相關股票的後續反應。"
+        " 事件訊號不等於交易建議，而是用來驗證 Google Trends、新聞與情緒是否能對股價形成可觀察影響。"
+    )
+
+    st.subheader("Data Quality Check")
+    quality = build_data_quality_check(performance, news)
+    st.metric("有效反應天數比例", f"{quality['reaction_days_valid_pct']:.1f}%")
+    if quality["sentiment_warning"]:
+        st.warning("情緒分析可能異常：Neutral 佔比超過 80%，請檢查中文新聞是否正確送入情緒模型。")
+    if quality["ma20_warning"] or quality["ma60_warning"]:
+        st.warning("突破日分布異常：MA20 或 MA60 突破日高度集中於同一天，建議檢查均線突破邏輯與事件時間對齊是否正確。")
 
     st.subheader("事件績效")
     display = performance.rename(columns={
