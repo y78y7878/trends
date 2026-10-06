@@ -43,6 +43,11 @@ if "start_date" not in inspect.signature(trends.event_study.build_event_frame).p
     )
 
 RESEARCH_START = pd.Timestamp(trends.event_study.RESEARCH_START_DATE)
+ANALYZED_SENTIMENTS = ("Positive", "Neutral", "Negative")
+UNANALYZED = "Unanalyzed"
+SENTIMENT_LABELS = {UNANALYZED: "未分析"}
+SENTIMENT_COVERAGE_MIN_PCT = 20.0
+LOW_SENTIMENT_COVERAGE_MESSAGE = "情緒樣本不足，請謹慎解讀"
 
 
 def configure_app() -> None:
@@ -157,17 +162,46 @@ def show_empty(message: str) -> None:
     st.info(message)
 
 
-def summarize_sentiment_distribution(news: pd.DataFrame) -> dict[str, float]:
+def normalize_sentiment(values: pd.Series) -> pd.Series:
+    sentiment = values.astype("object").where(values.notna(), UNANALYZED).astype(str).str.strip().str.title()
+    return sentiment.where(sentiment.isin(ANALYZED_SENTIMENTS), UNANALYZED)
+
+
+def sentiment_coverage_pct(analyzed: int, total: int) -> float | None:
+    return analyzed / total * 100 if total else None
+
+
+def is_low_sentiment_coverage(coverage_pct: float | None) -> bool:
+    return coverage_pct is not None and coverage_pct < SENTIMENT_COVERAGE_MIN_PCT
+
+
+def format_sentiment_coverage(analyzed: int, total: int) -> str:
+    coverage = sentiment_coverage_pct(analyzed, total)
+    return f"{analyzed:,} / {total:,}（{coverage:.1f}%）" if coverage is not None else f"{analyzed:,} / {total:,}（N/A）"
+
+
+def summarize_sentiment_distribution(news: pd.DataFrame) -> dict[str, object]:
+    """Sentiment percentages use analyzed news only; unanalyzed news is counted separately."""
     if news.empty or "news_sentiment" not in news.columns:
-        return {"positive_pct": 0.0, "neutral_pct": 0.0, "negative_pct": 0.0}
-    sentiment = news["news_sentiment"].fillna("Neutral").str.title()
-    counts = sentiment.value_counts(normalize=True) * 100
-    distribution = {
-        "positive_pct": float(counts.get("Positive", 0.0)),
-        "neutral_pct": float(counts.get("Neutral", 0.0)),
-        "negative_pct": float(counts.get("Negative", 0.0)),
+        sentiment = pd.Series(dtype=str)
+    else:
+        sentiment = normalize_sentiment(news["news_sentiment"])
+    counts = sentiment.value_counts()
+    total = int(len(sentiment))
+    analyzed = int(sum(counts.get(label, 0) for label in ANALYZED_SENTIMENTS))
+    coverage = sentiment_coverage_pct(analyzed, total)
+    summary: dict[str, object] = {
+        "total": total,
+        "analyzed": analyzed,
+        "unanalyzed": int(counts.get(UNANALYZED, 0)),
+        "coverage_pct": coverage,
+        "low_coverage": is_low_sentiment_coverage(coverage),
     }
-    return distribution
+    for label in ANALYZED_SENTIMENTS:
+        count = int(counts.get(label, 0))
+        summary[f"{label.lower()}_n"] = count
+        summary[f"{label.lower()}_pct"] = count / analyzed * 100 if analyzed else None
+    return summary
 
 
 def format_summary_value(value: object) -> str:
@@ -200,6 +234,8 @@ def format_event_table_value(value: object, column_name: str | None = None) -> s
 
 
 def build_sentiment_verification_sample(news: pd.DataFrame) -> pd.DataFrame:
+    if not news.empty and "news_sentiment" in news.columns:
+        news = news[normalize_sentiment(news["news_sentiment"]).isin(ANALYZED_SENTIMENTS)]
     if news.empty:
         return pd.DataFrame(columns=["新聞標題", "新聞摘要", "情緒標籤", "信心分數", "分析模型", "分析時間"])
     sample = news[["news_title", "news_source", "news_sentiment", "sentiment_score", "date"]].copy()
@@ -217,23 +253,20 @@ def build_sentiment_verification_sample(news: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_data_quality_check(performance: pd.DataFrame, news: pd.DataFrame) -> dict[str, object]:
+    sentiment = summarize_sentiment_distribution(news)
     metrics = {
-        "positive_pct": 0.0,
-        "neutral_pct": 0.0,
-        "negative_pct": 0.0,
+        "positive_pct": sentiment["positive_pct"],
+        "neutral_pct": sentiment["neutral_pct"],
+        "negative_pct": sentiment["negative_pct"],
+        "analyzed_news": sentiment["analyzed"],
+        "total_news": sentiment["total"],
+        "sentiment_coverage_pct": sentiment["coverage_pct"],
+        "low_sentiment_coverage": sentiment["low_coverage"],
         "reaction_days_valid_pct": 100.0,
         "ma20_warning": False,
         "ma60_warning": False,
-        "sentiment_warning": False,
+        "sentiment_warning": bool(sentiment["analyzed"] and sentiment["neutral_pct"] > 80),
     }
-    if not news.empty and "news_sentiment" in news.columns:
-        sentiment = news["news_sentiment"].fillna("Neutral").str.title()
-        counts = sentiment.value_counts(normalize=True) * 100
-        metrics["positive_pct"] = float(counts.get("Positive", 0.0))
-        metrics["neutral_pct"] = float(counts.get("Neutral", 0.0))
-        metrics["negative_pct"] = float(counts.get("Negative", 0.0))
-        if metrics["neutral_pct"] > 80:
-            metrics["sentiment_warning"] = True
     if not performance.empty:
         reaction_days = pd.to_numeric(performance.get("reaction_days", pd.Series(dtype=float)), errors="coerce")
         valid = reaction_days.dropna().between(0, 30)
@@ -254,7 +287,7 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
     news["date"] = pd.to_datetime(news["fetched_at"], errors="coerce").fillna(
         pd.to_datetime(news["published_at"], errors="coerce")
     ).dt.normalize()
-    news["news_sentiment"] = news["news_sentiment"].fillna("Neutral").str.title()
+    news["news_sentiment"] = normalize_sentiment(news["news_sentiment"])
     news["sentiment_score"] = pd.to_numeric(news.get("sentiment_score", pd.Series([None] * len(news))), errors="coerce")
     return news.dropna(subset=["date"])[columns]
 
@@ -363,9 +396,8 @@ def build_market_radar() -> pd.DataFrame:
         news = prepare_theme_news(observations, keywords)
         latest_theme_date = history["trend_date"].max().normalize() if not history.empty else pd.Timestamp.now().normalize()
         news = news[news["date"].between(latest_theme_date - pd.Timedelta(days=6), latest_theme_date)]
-        positive = int(news["news_sentiment"].eq("Positive").sum())
-        neutral = int(news["news_sentiment"].eq("Neutral").sum())
-        negative = int(news["news_sentiment"].eq("Negative").sum())
+        sentiment = summarize_sentiment_distribution(news)
+        coverage = sentiment["coverage_pct"]
 
         stock_returns = []
         if not all_prices.empty:
@@ -400,9 +432,11 @@ def build_market_radar() -> pd.DataFrame:
             "主題": theme_name,
             "熱度變化率": heat_change,
             "新聞數": len(news),
-            "正面": positive,
-            "中性": neutral,
-            "負面": negative,
+            "正面": sentiment["positive_n"],
+            "中性": sentiment["neutral_n"],
+            "負面": sentiment["negative_n"],
+            "未分析": sentiment["unanalyzed"],
+            "情緒覆蓋率": coverage / 100 if coverage is not None else pd.NA,
             "相關股票": ", ".join(stock_ids),
             "平均首次反應天數": average_reaction,
             "近 10 日表現": return_10d,
@@ -418,10 +452,12 @@ def page_market_radar() -> None:
         show_empty("尚無主題映射資料，請確認 theme_mapping.csv。")
         return
     st.caption("熱度變化比較最近 7 日與前 7 日平均；近 10 日表現為主題關聯股票等權平均。平均首次反應天數取每主題最近最多 50 個事件、每個關鍵字一檔映射股票；首次反應天數為事件後 1–30 個交易日內，收盤價相對事件日收盤首次變動達 ±1% 的交易日數，僅作為描述性觀察指標。")
+    st.caption(f"正面／中性／負面僅計入已分析新聞，未分析新聞另列；情緒覆蓋率低於 {SENTIMENT_COVERAGE_MIN_PCT:.0f}% 時{LOW_SENTIMENT_COVERAGE_MESSAGE}。")
     st.dataframe(
         radar,
         column_config={
             "熱度變化率": st.column_config.NumberColumn(format="percent"),
+            "情緒覆蓋率": st.column_config.NumberColumn(format="percent"),
             "近 10 日表現": st.column_config.NumberColumn(format="percent"),
         },
         hide_index=True,
@@ -491,7 +527,7 @@ def page_event_study() -> None:
         sentiment_counts = news.groupby(["date", "keyword", "news_sentiment"]).size()
         triggers["news_sentiment"] = triggers.apply(
             lambda row: ", ".join(
-                f"{sentiment} {int(count)}"
+                f"{SENTIMENT_LABELS.get(sentiment, sentiment)} {int(count)}"
                 for sentiment, count in sentiment_counts.get(
                     (row["event_date"], row["keyword"]), pd.Series(dtype=int)
                 ).items()
@@ -534,13 +570,14 @@ def page_event_study() -> None:
         x=theme_series["date"], y=theme_series["heat"], name="Google Trends 熱度",
         mode="lines", line={"color": "#2878b5", "width": 2.2},
     ), secondary_y=True)
-    sentiment_colors = {"Positive": "#228b55", "Neutral": "#e2b52d", "Negative": "#d64b45"}
+    sentiment_colors = {"Positive": "#228b55", "Neutral": "#e2b52d", "Negative": "#d64b45", UNANALYZED: "#a3aaa5"}
     for sentiment, color in sentiment_colors.items():
         subset = chart_news[chart_news["news_sentiment"].eq(sentiment)]
         if subset.empty:
             continue
         figure.add_trace(go.Scatter(
-            x=subset["date"], y=subset["marker_heat"], mode="markers", name=f"新聞：{sentiment}",
+            x=subset["date"], y=subset["marker_heat"], mode="markers",
+            name=f"新聞：{SENTIMENT_LABELS.get(sentiment, sentiment)}",
             marker={"color": color, "size": 9, "symbol": "circle"},
             customdata=subset[["news_title", "news_source", "keyword"]],
             hovertemplate="%{x|%Y-%m-%d}<br>%{customdata[2]}<br>%{customdata[0]}<br>%{customdata[1]}<extra></extra>",
@@ -612,17 +649,30 @@ def page_event_study() -> None:
 
     st.subheader("情緒分析驗證")
     if not news.empty:
-        sentiment_cols = st.columns(3)
-        with sentiment_cols[0]:
-            st.metric("Positive %", f"{sentiment_distribution['positive_pct']:.1f}%")
-        with sentiment_cols[1]:
-            st.metric("Neutral %", f"{sentiment_distribution['neutral_pct']:.1f}%")
-        with sentiment_cols[2]:
-            st.metric("Negative %", f"{sentiment_distribution['negative_pct']:.1f}%")
-        if sentiment_distribution["neutral_pct"] > 80:
-            st.warning("Neutral 占比超過 80%，請檢查情緒分析流程是否失效、是否僅使用英文模型、是否新聞內容未正確傳入分析模組。")
+        analyzed = int(sentiment_distribution["analyzed"])
+        coverage_cols = st.columns(2)
+        with coverage_cols[0]:
+            st.metric("已分析新聞", f"{analyzed:,} / {int(sentiment_distribution['total']):,}")
+        with coverage_cols[1]:
+            coverage = sentiment_distribution["coverage_pct"]
+            st.metric("情緒覆蓋率", f"{coverage:.1f}%" if coverage is not None else "N/A")
+        if sentiment_distribution["low_coverage"]:
+            st.warning(LOW_SENTIMENT_COVERAGE_MESSAGE)
+        sentiment_cols = st.columns(4)
+        for column, label in zip(sentiment_cols, ANALYZED_SENTIMENTS):
+            with column:
+                value = sentiment_distribution[f"{label.lower()}_pct"]
+                st.metric(f"{label} %", f"{value:.1f}%" if value is not None else "N/A")
+        with sentiment_cols[3]:
+            st.metric("未分析", f"{int(sentiment_distribution['unanalyzed']):,}")
+        st.caption(f"Positive／Neutral／Negative 比例僅依已分析的 {analyzed:,} 則新聞計算，未分析新聞不計入。")
+        if analyzed and sentiment_distribution["neutral_pct"] > 80:
+            st.warning("已分析新聞中 Neutral 占比超過 80%，請檢查情緒分析流程是否失效、是否僅使用英文模型、是否新聞內容未正確傳入分析模組。")
         sentiment_table = build_sentiment_verification_sample(news)
-        st.dataframe(sentiment_table, hide_index=True)
+        if sentiment_table.empty:
+            st.info("目前無已分析新聞可供驗證")
+        else:
+            st.dataframe(sentiment_table, hide_index=True)
     else:
         st.info("目前此範圍內沒有可驗證的新聞情緒資料。")
 
@@ -644,9 +694,18 @@ def page_event_study() -> None:
 
     st.subheader("Data Quality Check")
     quality = build_data_quality_check(performance, news)
-    st.metric("有效首次反應天數比例", f"{quality['reaction_days_valid_pct']:.1f}%")
+    quality_cols = st.columns(2)
+    with quality_cols[0]:
+        st.metric("有效首次反應天數比例", f"{quality['reaction_days_valid_pct']:.1f}%")
+    with quality_cols[1]:
+        st.metric(
+            "情緒分析覆蓋率",
+            format_sentiment_coverage(int(quality["analyzed_news"]), int(quality["total_news"])),
+        )
+    if quality["low_sentiment_coverage"]:
+        st.warning(LOW_SENTIMENT_COVERAGE_MESSAGE)
     if quality["sentiment_warning"]:
-        st.warning("情緒分析可能異常：Neutral 佔比超過 80%，請檢查中文新聞是否正確送入情緒模型。")
+        st.warning("情緒分析可能異常：已分析新聞中 Neutral 佔比超過 80%，請檢查中文新聞是否正確送入情緒模型。")
     if quality["ma20_warning"] or quality["ma60_warning"]:
         st.warning("突破日分布異常：MA20 或 MA60 突破日高度集中於同一天，建議檢查均線突破邏輯與事件時間對齊是否正確。")
 
@@ -690,6 +749,10 @@ def main() -> None:
             f"關鍵字 {int(status['total_keywords']):,}｜新聞 {int(status['total_news']):,}\n\n"
             f"股票行情 {int(status['stock_rows']):,} 筆｜主題 {int(status['theme_count']):,} 個"
         )
+        analyzed_news, total_news = int(status["analyzed_news"]), int(status["total_news"])
+        st.caption(f"情緒分析覆蓋率 {format_sentiment_coverage(analyzed_news, total_news)}")
+        if is_low_sentiment_coverage(sentiment_coverage_pct(analyzed_news, total_news)):
+            st.warning(LOW_SENTIMENT_COVERAGE_MESSAGE, icon=":material/warning:")
         if st.button("更新研究資料", type="primary", icon=":material/refresh:", width="stretch"):
             try:
                 with st.spinner("更新行情、關鍵字分類與新聞情緒…"):
