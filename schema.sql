@@ -1,3 +1,8 @@
+-- Time convention: every DATETIME column stores naive UTC as 'YYYY-MM-DD HH:MM:SS'
+-- (same as SQLite CURRENT_TIMESTAMP). Business dates and display use Asia/Taipei.
+-- PRAGMA user_version = 2 marks a database whose RSS data is UTC and deduplicated
+-- (trends.migrations.p0_2_timezone -> 1, p0_1_dedupe_rss -> 2); init_db stamps new databases with 2.
+
 CREATE TABLE IF NOT EXISTS google_trends (
     trend_id INTEGER PRIMARY KEY AUTOINCREMENT,
     keyword TEXT,
@@ -136,3 +141,8 @@ CREATE TABLE IF NOT EXISTS theme_daily_stats (
 CREATE INDEX IF NOT EXISTS idx_google_trends_keyword ON google_trends(keyword);
 CREATE INDEX IF NOT EXISTS idx_google_trends_published_at ON google_trends(published_at);
 CREATE INDEX IF NOT EXISTS idx_event_analysis_date_stock ON event_analysis(event_date, stock_id);
+
+-- RSS natural keys; the collector relies on them for ON CONFLICT. On an existing database these
+-- may only be created after p0_1_dedupe_rss (user_version = 2), otherwise creation fails on duplicates.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_google_trends_keyword_published ON google_trends(keyword, published_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_google_trends_news_trend_url ON google_trends_news(trend_id, news_url);

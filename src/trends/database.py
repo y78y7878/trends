@@ -3,12 +3,20 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 
-from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, inspect, text
+from sqlalchemy import BigInteger, Date, DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint, create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 DB_PATH = Path(__file__).resolve().parents[2] / "data.db"
+
+# PRAGMA user_version once the P0 migrations (p0_2_timezone -> 1, p0_1_dedupe_rss -> 2) have run.
+# From this version on, RSS timestamps are canonical naive UTC and the natural keys are unique.
+RSS_SCHEMA_VERSION = 2
+RSS_UNIQUE_INDEXES = {
+    "uq_google_trends_keyword_published": ("google_trends", ("keyword", "published_at")),
+    "uq_google_trends_news_trend_url": ("google_trends_news", ("trend_id", "news_url")),
+}
 
 
 class Base(DeclarativeBase):
@@ -17,6 +25,7 @@ class Base(DeclarativeBase):
 
 class GoogleTrend(Base):
     __tablename__ = "google_trends"
+    __table_args__ = (Index("uq_google_trends_keyword_published", "keyword", "published_at", unique=True),)
 
     id: Mapped[int] = mapped_column("trend_id", Integer, primary_key=True, autoincrement=True)
     keyword: Mapped[str | None] = mapped_column(String(255), index=True)
@@ -27,6 +36,7 @@ class GoogleTrend(Base):
 
 class GoogleTrendNews(Base):
     __tablename__ = "google_trends_news"
+    __table_args__ = (Index("uq_google_trends_news_trend_url", "trend_id", "news_url", unique=True),)
 
     id: Mapped[int] = mapped_column("news_id", Integer, primary_key=True, autoincrement=True)
     trend_id: Mapped[int | None] = mapped_column(BigInteger, ForeignKey("google_trends.trend_id"))
@@ -183,8 +193,39 @@ def get_engine(db_path: str | Path = DB_PATH) -> Engine:
     return engine
 
 
+def schema_version(engine: Engine) -> int:
+    with engine.connect() as connection:
+        return int(connection.exec_driver_sql("PRAGMA user_version").scalar() or 0)
+
+
+def rss_schema_ready(engine: Engine) -> bool:
+    """True when RSS data is migrated (UTC, deduplicated) and the unique indexes exist."""
+    if schema_version(engine) < RSS_SCHEMA_VERSION:
+        return False
+    with engine.connect() as connection:
+        existing = set(connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).scalars())
+    return set(RSS_UNIQUE_INDEXES) <= existing
+
+
+def _ensure_rss_unique_indexes(connection) -> None:
+    for name, (table, columns) in RSS_UNIQUE_INDEXES.items():
+        connection.exec_driver_sql(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {table} ({', '.join(columns)})"
+        )
+
+
 def init_db(engine: Engine | None = None) -> Engine:
+    """Create missing tables and columns.
+
+    RSS unique indexes are only created on a fresh database (which is stamped with
+    RSS_SCHEMA_VERSION) or on a database already migrated by p0_2/p0_1. A legacy database
+    (user_version < RSS_SCHEMA_VERSION) is left untouched so the app keeps working until the
+    maintenance window: create_all never adds indexes to tables that already exist.
+    """
     db_engine = engine or get_engine()
+    fresh = not inspect(db_engine).has_table("google_trends")
     Base.metadata.create_all(db_engine)
 
     migrations = {
@@ -220,5 +261,9 @@ def init_db(engine: Engine | None = None) -> Engine:
                     connection.execute(text(
                         f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"
                     ))
+        if fresh:
+            connection.exec_driver_sql(f"PRAGMA user_version = {RSS_SCHEMA_VERSION}")
+        elif int(connection.exec_driver_sql("PRAGMA user_version").scalar() or 0) >= RSS_SCHEMA_VERSION:
+            _ensure_rss_unique_indexes(connection)
 
     return db_engine

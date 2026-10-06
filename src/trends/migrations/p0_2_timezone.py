@@ -16,6 +16,7 @@ import sqlite3
 from collections import Counter
 from datetime import datetime
 
+from trends.database import RSS_UNIQUE_INDEXES
 from trends.migrations._common import (
     MigrationError,
     Plan,
@@ -65,6 +66,9 @@ class TimezoneMigration:
                 failures.append(f"missing table {table}")
         if failures:
             return failures
+        existing_indexes = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+        for index in sorted(existing_indexes & set(RSS_UNIQUE_INDEXES)):
+            failures.append(f"unique index {index} exists; shifting timestamps under it can collide transiently")
         for table in DERIVED_TABLES:
             if row_count(connection, table):
                 failures.append(f"{table} must be empty (has {row_count(connection, table)} rows)")

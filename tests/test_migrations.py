@@ -7,7 +7,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from trends.database import get_engine, init_db
+from trends.database import RSS_SCHEMA_VERSION, RSS_UNIQUE_INDEXES, get_engine, init_db, rss_schema_ready
 from trends.migrations._common import (
     MigrationError,
     backup_database,
@@ -22,10 +22,13 @@ from trends.migrations.p0_2_timezone import MIGRATION as TIMEZONE
 
 
 def create_database(path: Path, trends: list[tuple], news: list[tuple], version: int = 0) -> Path:
+    """Build a legacy (pre-P0) database: current schema without the RSS unique indexes."""
     engine = get_engine(path)
     init_db(engine)
     engine.dispose()
     connection = sqlite3.connect(path)
+    for index in RSS_UNIQUE_INDEXES:
+        connection.execute(f"DROP INDEX IF EXISTS {index}")
     connection.executemany(
         "INSERT INTO google_trends (trend_id, keyword, approx_traffic, published_at, fetched_at) VALUES (?, ?, ?, ?, ?)",
         trends,
@@ -336,6 +339,73 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(snapshot(self.db), original)
         self.assertEqual(snapshot(Path(result["previous_copy"]))["version"], 1)
+
+
+def index_names(path: Path) -> set[str]:
+    connection = sqlite3.connect(path)
+    try:
+        return {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    finally:
+        connection.close()
+
+
+def initialise(path: Path) -> bool:
+    engine = get_engine(path)
+    try:
+        init_db(engine)
+        return rss_schema_ready(engine)
+    finally:
+        engine.dispose()
+
+
+class SchemaCompatibilityTests(unittest.TestCase):
+    """C4: init_db must leave a legacy database alone and finish the job after the migrations."""
+
+    def setUp(self) -> None:
+        self.directory = TemporaryDirectory()
+        self.root = Path(self.directory.name)
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_versions_line_up(self) -> None:
+        self.assertEqual((TIMEZONE.from_version, TIMEZONE.to_version), (0, 1))
+        self.assertEqual((DEDUPE.from_version, DEDUPE.to_version), (1, RSS_SCHEMA_VERSION))
+
+    def test_fresh_database_is_stamped_and_indexed(self) -> None:
+        path = self.root / "fresh.db"
+
+        self.assertTrue(initialise(path))
+        self.assertEqual(snapshot(path)["version"], RSS_SCHEMA_VERSION)
+        self.assertLessEqual(set(RSS_UNIQUE_INDEXES), index_names(path))
+
+    def test_legacy_database_with_duplicates_is_left_untouched(self) -> None:
+        path = create_database(self.root / "legacy.db", MIXED_TRENDS, MIXED_NEWS, version=0)
+        before = snapshot(path)
+
+        self.assertFalse(initialise(path))
+        self.assertEqual(snapshot(path), before)
+        self.assertFalse(set(RSS_UNIQUE_INDEXES) & index_names(path))
+
+    def test_indexes_are_created_after_both_migrations(self) -> None:
+        path = create_database(self.root / "pipeline.db", MIXED_TRENDS, MIXED_NEWS)
+        run_migration(path, TIMEZONE)
+        self.assertFalse(initialise(path), "version 1 must not get the indexes yet")
+
+        run_migration(path, DEDUPE)
+
+        self.assertTrue(initialise(path))
+        self.assertLessEqual(set(RSS_UNIQUE_INDEXES), index_names(path))
+
+    def test_timezone_migration_refuses_when_unique_index_exists(self) -> None:
+        path = create_database(self.root / "indexed.db", MIXED_TRENDS[2:], MIXED_NEWS[1:])
+        connection = sqlite3.connect(path)
+        connection.execute("CREATE UNIQUE INDEX uq_google_trends_keyword_published ON google_trends (keyword, published_at)")
+        connection.commit()
+        connection.close()
+
+        with self.assertRaisesRegex(MigrationError, "unique index"):
+            run_migration(path, TIMEZONE)
 
 
 if __name__ == "__main__":
