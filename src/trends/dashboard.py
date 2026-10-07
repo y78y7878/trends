@@ -297,82 +297,174 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
     return news.dropna(subset=["date"])[columns]
 
 
+def render_overview_cards(cards: list[tuple[str, str]]) -> None:
+    for column, (title, body) in zip(st.columns(len(cards)), cards):
+        with column, st.container(border=True):
+            st.markdown(f"**{title}**")
+            st.markdown(body)
+
+
 def page_project_overview() -> None:
-    st.title("Trends & Theme 市場事件分析平台")
-    st.caption("熱門話題被大量討論時，相關股票是否仍有投資機會？以 Google Trends、新聞與股價資料建立可解釋的事件研究。")
-    st.subheader("研究問題")
-    st.write("本平台不預測股價，也不提供交易訊號；目標是驗證熱門事件與市場反應之間是否存在可觀察的關聯，以及反應發生的時間與主題差異。")
+    st.title("Python 自動化資料分析平台")
+    st.markdown("#### 從資料收集、清洗、AI 分析到 Dashboard 展示的自動化資料系統")
+    st.markdown("**專案成果摘要**")
+    render_overview_cards([
+        ("✔ 開發期間：1.5 個月", "從規劃到完成約 1.5 個月"),
+        ("✔ Python", "Pandas 資料處理與自動化"),
+        ("✔ ETL", "自動收集、清洗，集中存入 SQLite"),
+    ])
+    render_overview_cards([
+        ("✔ Dashboard", "Streamlit 互動式報表"),
+        ("✔ AI 分析", "Gemini 自動分類與情緒判讀"),
+        ("✔ Git 版本控制", "完整保留開發與修正紀錄"),
+    ])
 
-    st.subheader("研究假說")
-    st.markdown(
-        "1. 搜尋熱度明顯上升後，相關股票未來數個交易日出現正報酬的比例可能提高。\n"
-        "2. 正面新聞的平均股價反應可能大於負面新聞。\n"
-        "3. AI、科技、金融、能源、生技、消費與半導體等主題可能有不同反應速度。\n"
-        "4. 搜尋熱度高峰與 MA20、MA60 均線突破之間可能存在時間差。"
-    )
-
-    st.subheader("資料流程")
-    st.markdown(
-        "Google Trends 熱搜\n\n↓\n\n熱門關鍵字與熱度\n\n↓\n\n相關新聞蒐集\n\n↓\n\nAI 關鍵字分類與新聞情緒分析\n\n↓\n\n主題與股票關聯建立\n\n↓\n\n股價資料下載\n\n↓\n\n事件資料集與事件報酬計算\n\n↓\n\n整合圖表與研究結果"
-    )
-
-    st.subheader("ETL 與系統架構")
-    extract, transform, load = st.columns(3)
-    with extract:
-        st.markdown("**Extract**")
-        st.write("Google Trends：關鍵字、熱度、時間\n\n新聞：標題、摘要、時間、來源\n\n股票：開高低收、成交量")
-    with transform:
-        st.markdown("**Transform**")
-        st.write("關鍵字正規化\n\nAI 主題分類\n\n新聞情緒標註\n\n主題與股票映射\n\n事件觸發與報酬計算")
-    with load:
-        st.markdown("**Load**")
-        st.write("SQLite `data.db`\n\n單機可攜，不依賴雲端資料庫；同一份資料支援收集、整理與視覺化分析。")
-
+    st.divider()
+    st.subheader("我的能力成長路線")
     st.graphviz_chart(
-        '''digraph architecture {
-            rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#f4f7f0", color="#53745b"];
-            trends [label="Google Trends"];
-            news [label="新聞與情緒"];
-            stocks [label="股票行情"];
-            etl [label="分類、映射、事件 ETL"];
-            sqlite [label="SQLite / data.db"];
-            radar [label="市場雷達"];
-            study [label="事件研究"];
-            trends -> etl; news -> etl; stocks -> etl; etl -> sqlite; sqlite -> radar; sqlite -> study;
+        '''digraph growth {
+            rankdir=LR; node [shape=box, style="rounded,filled", color="#53745b"]; edge [color="#53745b"];
+            warehouse [label="倉管／出貨管理", fillcolor="#e9ece4"];
+            erp [label="ERP 維護", fillcolor="#e9ece4"];
+            vba [label="Excel VBA 自動化", fillcolor="#dfe9d3"];
+            python [label="Python 資料處理", fillcolor="#d3e4c9"];
+            etl [label="ETL 流程設計", fillcolor="#c6dcbd"];
+            dashboard [label="Dashboard 開發", fillcolor="#b6d2ad"];
+            ai [label="AI 資料分析", fillcolor="#2f6b4f", fontcolor="#ffffff"];
+            warehouse -> erp -> vba -> python -> etl -> dashboard -> ai;
         }''',
         width="stretch",
     )
+    st.markdown(
+        "過去主要負責訂單管理、出貨流程與 ERP 維護。"
+        "利用 Excel VBA 自動化訂單與出貨流程，將每日人工處理時間由約 3 至 4 小時縮短至 5 至 10 分鐘。\n\n"
+        "後續進一步學習 Python，將自動化能力擴展至資料工程、Dashboard 與 AI 應用。"
+    )
 
-    st.subheader("核心資料表關聯")
+    st.divider()
+    st.subheader("為什麼開發這個專案？")
+    st.markdown("從接觸股票市場以來，每當看到某檔股票的相關新聞時，腦中都會出現幾個問題：")
+    st.markdown(
+        "> 現在看到新聞才知道這件事，是不是已經太晚了？\n>\n"
+        "> 這則新聞出現時，市場是否早就已經反應？\n>\n"
+        "> 一般投資人在看到新聞的當下，收到的資訊可能已經是二手、甚至三手以上的資訊。"
+    )
+    st.markdown(
+        "因此開始思考：是否能透過資料分析的方式，驗證熱門話題、新聞討論熱度與市場反應之間是否存在規律。\n\n"
+        "在職訓期間學習 Python、資料分析、資料庫、視覺化報表與 AI 應用後，決定把這個長期存在的疑問轉換成實際專案。\n\n"
+        "本專案希望建立一套能夠「自動收集資料 → 分析資料 → 呈現資料」的流程，"
+        "並透過客觀數據觀察：當話題升溫後，市場是否產生明顯反應。\n\n"
+        "希望透過數據驗證，協助一般人更理性理解新聞、市場關注度與市場反應之間的關係。"
+    )
+    st.markdown(
+        "本專案研究的重點不是單純觀察哪些關鍵字上榜，而是觀察：哪些話題出現異常升溫，"
+        "以及這些異常訊號之後，市場是否產生明顯反應。"
+    )
+
+    st.divider()
+    st.subheader("系統全貌")
     st.graphviz_chart(
-        '''digraph schema {
-            rankdir=LR; node [shape=record, style=filled, fillcolor="#f4f7f0", color="#53745b"];
-            trends [label="{google_trends|trend_id|keyword|published_at}"];
-            news [label="{google_trends_news|news_id|trend_id|news_sentiment}"];
-            classify [label="{keyword_classification|keyword|theme_name|canonical_keyword}"];
-            mapping [label="{theme_mapping|theme_name|keyword|stock_id}"];
-            history [label="{google_trends_history|keyword|theme_name|trend_date|trend_score}"];
-            stocks [label="{stocks|date|stock_id|OHLCV}"];
-            events [label="{event_analysis|trend_id|news_id|stock_id|future returns}"];
-            trends -> news [label="trend_id"];
-            trends -> classify [label="keyword"];
-            classify -> mapping [label="theme / keyword"];
-            mapping -> history [label="theme / keyword"];
-            mapping -> stocks [label="stock_id"];
-            trends -> events [label="trend_id"];
-            news -> events [label="news_id"];
-            stocks -> events [label="stock_id + market date"];
+        r'''digraph pipeline {
+            rankdir=LR; node [shape=box, style="rounded,filled", fillcolor="#f4f7f0", color="#53745b", margin="0.25,0.15"];
+            edge [color="#53745b"];
+            collect [label="① 自動收集\n\nGoogle Trends 熱搜 RSS（含相關新聞）\nGoogle Trends 每日搜尋熱度\n(pytrends)\n股票行情\n(yfinance)"];
+            clean [label="② 清洗整合\n\n去除重複\n時間統一\n日期對齊", fillcolor="#dfe9d3"];
+            store [label="③ 集中儲存\n\nSQLite"];
+            analyze [label="④ AI 分析\n\nGemini 主題分類\n情緒分析", fillcolor="#dfe9d3"];
+            present [label="⑤ Dashboard\n\n市場雷達\n事件研究"];
+            collect -> clean -> store -> analyze -> present;
         }''',
         width="stretch",
     )
+    st.info("整個流程可透過排程自動執行，大幅降低資料收集、整理與分析的人工作業成本。", icon=":material/schedule:")
 
-    st.subheader("作品集價值")
-    st.dataframe(pd.DataFrame([
-        {"能力面向": "資料工程", "展示內容": "多來源 ETL、自動化收集、SQLite 資料模型"},
-        {"能力面向": "資料分析", "展示內容": "事件研究、熱度變化、新聞情緒與股票報酬"},
-        {"能力面向": "商業分析", "展示內容": "市場主題辨識、事件影響與市場反應驗證"},
-        {"能力面向": "資料視覺化", "展示內容": "多來源整合圖、事件績效表與儀表板資訊設計"},
-    ]), hide_index=True)
+    st.divider()
+    st.subheader("成果展示")
+    st.markdown("從畫面可以直接得到的資訊：")
+    radar, study = st.columns(2)
+    with radar, st.container(border=True):
+        st.markdown("**市場雷達：現在市場在關注什麼？**")
+        st.markdown(
+            "- **各主題搜尋熱度與新聞量概況**：觀察不同主題近期的搜尋熱度變化、新聞討論量與相關股票表現\n"
+            "- **搜尋熱度變化**：比較近 7 日與前 7 日的 Google 搜尋熱度差異\n"
+            "- **新聞情緒分布**：正面、中性、負面新聞各占多少\n"
+            "- **對應股票表現**：相關股票近 10 日的漲跌"
+        )
+        st.caption(
+            "注意：搜尋熱度並不等於事件。只有當搜尋熱度相較於過去平均明顯上升，"
+            "或新聞量明顯增加時，系統才會判定為事件。"
+        )
+    with study, st.container(border=True):
+        st.markdown("**事件研究：事件發生後，市場怎麼反應？**")
+        st.markdown(
+            "- **事件發生日**：搜尋熱度或新聞量明顯暴增的日期\n"
+            "- **搜尋熱度變化**：事件前後的關注度起伏\n"
+            "- **情緒變化**：當時新聞偏正面還是偏負面\n"
+            "- **市場反應**：事件後 1、3、5、10 個交易日的股價變化"
+        )
+        st.caption(
+            "事件（Event）不等於熱搜關鍵字。事件定義為：搜尋熱度相較過去平均明顯提升，"
+            "或相關新聞量異常增加時，所產生的異常訊號。"
+        )
+    st.caption("事件研究將股價、搜尋熱度、新聞情緒與事件日期整合於同一張圖，幫助快速理解事件發生後的變化。請由上方導覽列切換至「市場雷達」與「事件研究」查看實際畫面。")
+
+    st.divider()
+    st.subheader("資料品質與 ETL")
+    render_overview_cards([
+        ("1. 去除重複", "同一筆熱搜中的相同新聞網址只保留一筆，避免重複收集造成分析失真"),
+        ("2. 時間統一", "國際標準時間統一換算為台灣日期"),
+        ("3. 日期對齊", "非交易日自動對齊至下一個交易日"),
+        ("4. 未分析分離", "未分析資料不等於中性"),
+    ])
+    st.markdown("> **資料工程的核心不是取得資料，而是讓資料值得被信任。**")
+
+    st.divider()
+    st.subheader("AI 實務應用")
+    render_overview_cards([
+        ("AI 協助分類", "大量熱門關鍵字自動歸入科技類、金融類、生技醫療類等主題，不必人工逐筆歸類"),
+        ("AI 協助判讀", "AI 根據新聞標題與新聞來源，協助判斷新聞傾向為：\n- 正面\n- 中性\n- 負面"),
+        ("AI 提升效率", "大量新聞批次交給 AI 處理，不必逐篇閱讀整理"),
+        ("AI 降低人工成本", "人員只需抽查與判斷結果；AI 用量依額度分批控管"),
+    ])
+    st.caption("品質控管：畫面會顯示 AI 已分析的比例，尚未分析的資料另外標示，不會自行補上結果。")
+    st.markdown("> **不只使用 AI，更管理 AI 結果品質與使用成本。**")
+
+    st.divider()
+    st.subheader("問題與解決方案")
+    render_overview_cards([
+        ("案例 1：重複資料", "**問題：** 重複資料\n\n**解法：** 唯一條件與去重機制\n\n**成果：** 重複執行仍保持正確"),
+        ("案例 2：日期偏移", "**問題：** 日期偏移\n\n**解法：** 統一國際時間與台灣時間的換算規則\n\n**成果：** 事件歸屬正確"),
+        ("案例 3：情緒失真", "**問題：** 未分析資料造成情緒失真\n\n**解法：** 區分「尚未分析」與「中性」\n\n**成果：** 提升資料可信度"),
+    ])
+
+    st.divider()
+    st.subheader("成果與價值")
+    st.markdown("**這套架構可直接套用於：**")
+    render_overview_cards([
+        ("訂單分析", "找出訂單量變化與異常波動"),
+        ("客訴分析", "分析客訴主題與情緒變化"),
+        ("庫存分析", "觀察庫存變化與缺貨風險"),
+        ("ERP 資料分析", "自動整合多來源資料"),
+        ("BI 報表系統", "提供管理者定期更新且易於理解的決策參考資訊"),
+    ])
+
+    st.markdown("#### 我的成長目標")
+    with st.container(border=True):
+        st.markdown(
+            "過去在倉管、出貨管理與 ERP 維護工作中，習慣在追求正確性的前提下持續改善流程效率。"
+            "當時主要使用 Excel 處理資料與報表，雖然能幫助公司降低作業成本，但分析深度與應用範圍仍有限。"
+        )
+        st.markdown("因此開始學習，目前已實際應用：")
+        st.markdown("- Python\n- VS Code\n- GitHub\n- 資料分析\n- ETL\n- Dashboard 開發")
+        st.markdown("持續學習：")
+        st.markdown("- Power BI")
+        st.markdown(
+            "希望將原本的流程改善能力，進一步提升為資料分析與決策支援能力。\n\n"
+            "未來目標是：不只是協助企業降低成本，更能透過數據整理、分析與視覺化，"
+            "協助管理者發現問題、評估機會，並作為決策參考依據。"
+        )
+
+    st.caption("本專案以資料分析與系統開發為主要目的，分析結果僅供觀察與研究參考。")
 
 
 @st.cache_data(ttl=300)
