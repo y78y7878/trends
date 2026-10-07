@@ -14,6 +14,9 @@ wheels/
 *.sqlite3
 db.sqlite3
 
+# 收集器與排程 log
+logs/
+
 # 忽略 Python 產生的快取檔 (選擇性)
 __pycache__/
 *.pyc
