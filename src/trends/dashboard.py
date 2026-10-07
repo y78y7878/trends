@@ -309,7 +309,7 @@ def page_project_overview() -> None:
     st.markdown("#### 從資料收集、清洗、AI 分析到 Dashboard 展示的自動化資料系統")
     st.markdown("**專案成果摘要**")
     render_overview_cards([
-        ("✔ 開發期間：1.5 個月", "從規劃到完成約 1.5 個月"),
+        ("✔ 開發期間：至今約1.5 個月", "尚未完成所有功能，持續開發中"),
         ("✔ Python", "Pandas 資料處理與自動化"),
         ("✔ ETL", "自動收集、清洗，集中存入 SQLite"),
     ])
