@@ -22,11 +22,15 @@ from trends.database import (
     init_db,
 )
 from trends.event_study import (
+    ANALYZED_SENTIMENTS,
+    MIXED,
+    UNANALYZED,
     build_event_research_overview,
     build_event_research_summary,
     build_event_research_text,
     build_hypothesis_validation,
     calculate_event_performance,
+    derive_event_sentiment,
     detect_research_events,
     normalize_breakout_day,
 )
@@ -50,9 +54,7 @@ if "start_date" not in inspect.signature(trends.event_study.build_event_frame).p
     )
 
 RESEARCH_START = pd.Timestamp(trends.event_study.RESEARCH_START_DATE)
-ANALYZED_SENTIMENTS = ("Positive", "Neutral", "Negative")
-UNANALYZED = "Unanalyzed"
-SENTIMENT_LABELS = {UNANALYZED: "未分析"}
+SENTIMENT_LABELS = {UNANALYZED: "未分析", MIXED: "混合"}
 SENTIMENT_COVERAGE_MIN_PCT = 20.0
 LOW_SENTIMENT_COVERAGE_MESSAGE = "情緒樣本不足，請謹慎解讀"
 
@@ -297,6 +299,37 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
     return news.dropna(subset=["date"])[columns]
 
 
+def annotate_event_sentiment(triggers: pd.DataFrame, news: pd.DataFrame) -> pd.DataFrame:
+    """Attach same-day, same-keyword news sentiment to each event.
+
+    ``news_sentiment`` stays a display string ("Positive 2, 未分析 1" / "無新聞"); the structured
+    ``event_sentiment`` (R1 majority) and counts are what hypothesis 2 computes on.
+    """
+    frame = triggers.copy()
+    if frame.empty:
+        for column, dtype in (("news_sentiment", "object"), ("event_sentiment", "object"), ("analyzed_news_count", "int64"),
+                              ("positive_news_count", "int64"), ("negative_news_count", "int64")):
+            frame[column] = pd.Series(dtype=dtype)
+        return frame
+    sentiment_counts = (
+        news.groupby(["date", "keyword", "news_sentiment"]).size()
+        if not news.empty else pd.Series(dtype=int)
+    )
+    per_event = [
+        sentiment_counts.get((event_date, keyword), pd.Series(dtype=int))
+        for event_date, keyword in zip(frame["event_date"], frame["keyword"])
+    ]
+    frame["news_sentiment"] = [
+        ", ".join(f"{SENTIMENT_LABELS.get(sentiment, sentiment)} {int(count)}" for sentiment, count in counts.items()) or "無新聞"
+        for counts in per_event
+    ]
+    frame["event_sentiment"] = [derive_event_sentiment(counts.to_dict()) for counts in per_event]
+    frame["analyzed_news_count"] = [int(sum(int(counts.get(label, 0)) for label in ANALYZED_SENTIMENTS)) for counts in per_event]
+    frame["positive_news_count"] = [int(counts.get("Positive", 0)) for counts in per_event]
+    frame["negative_news_count"] = [int(counts.get("Negative", 0)) for counts in per_event]
+    return frame
+
+
 def page_project_overview() -> None:
     st.title("Trends & Theme 市場事件分析平台")
     st.caption("熱門話題被大量討論時，相關股票是否仍有投資機會？以 Google Trends、新聞與股價資料建立可解釋的事件研究。")
@@ -530,16 +563,7 @@ def page_event_study() -> None:
     if not triggers.empty:
         triggers["theme"] = theme_name
         triggers["stock_id"] = str(stock_id)
-        sentiment_counts = news.groupby(["date", "keyword", "news_sentiment"]).size()
-        triggers["news_sentiment"] = triggers.apply(
-            lambda row: ", ".join(
-                f"{SENTIMENT_LABELS.get(sentiment, sentiment)} {int(count)}"
-                for sentiment, count in sentiment_counts.get(
-                    (row["event_date"], row["keyword"]), pd.Series(dtype=int)
-                ).items()
-            ) or "無新聞",
-            axis=1,
-        )
+        triggers = annotate_event_sentiment(triggers, news)
     performance = calculate_event_performance(triggers, prices)
     summary = build_event_research_summary(performance)
     sentiment_distribution = summarize_sentiment_distribution(news)
@@ -718,17 +742,20 @@ def page_event_study() -> None:
     st.subheader("事件績效")
     display = performance.rename(columns={
         "event_date": "事件日期", "keyword": "關鍵字", "theme": "主題", "stock_id": "股票",
-        "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "return_1d": "1日報酬",
+        "news_sentiment": "新聞情緒", "event_sentiment": "事件情緒", "event_heat": "事件熱度", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
         "reaction_days": "首次反應天數",
         "ma20_breakout_day": "MA20突破日",
         "ma60_breakout_day": "MA60突破日",
     }).copy()
+    display["事件情緒"] = display.get("事件情緒", pd.Series(UNANALYZED, index=display.index)).map(
+        lambda value: SENTIMENT_LABELS.get(value, value)
+    )
     for column in display.columns:
         display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
     display = display[[
-        "事件日期", "關鍵字", "主題", "股票", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
+        "事件日期", "關鍵字", "主題", "股票", "新聞情緒", "事件情緒", "事件熱度", "1日報酬", "3日報酬",
         "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
     ]]
     st.dataframe(display, hide_index=True)

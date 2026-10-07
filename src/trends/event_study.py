@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 
@@ -14,6 +15,20 @@ from trends.keyword_mapping import DEFAULT_MAPPING_PATH, load_keyword_mapping, m
 
 
 RESEARCH_START_DATE = date(2026, 8, 21)
+ANALYZED_SENTIMENTS = ("Positive", "Neutral", "Negative")
+UNANALYZED = "Unanalyzed"
+MIXED = "Mixed"
+H2_MIN_EVENTS = 5
+
+
+def derive_event_sentiment(counts: Mapping[str, int]) -> str:
+    """Majority vote over analysed news (R1); ties are Mixed, no analysed news is Unanalyzed."""
+    analysed = {label: int(counts.get(label, 0) or 0) for label in ANALYZED_SENTIMENTS}
+    top = max(analysed.values())
+    if top <= 0:
+        return UNANALYZED
+    leaders = [label for label, count in analysed.items() if count == top]
+    return leaders[0] if len(leaders) == 1 else MIXED
 
 
 def build_event_frame(
@@ -333,6 +348,45 @@ def build_event_research_overview(theme_name: str, start_date: date | pd.Timesta
     )
 
 
+def _validate_sentiment_hypothesis(performance: pd.DataFrame) -> dict[str, str]:
+    """H2: Positive events have a higher mean 10-day return than Negative events.
+
+    Uses the structured ``event_sentiment`` (R1 majority) when present; ``news_sentiment`` is a
+    display string such as "Positive 2, 未分析 1" and is only matched exactly for legacy input.
+    """
+    title = "假說2：正面新聞影響大於負面新聞。"
+    if "event_sentiment" in performance.columns:
+        sentiment = performance["event_sentiment"].astype("object")
+    else:
+        sentiment = performance.get("news_sentiment", pd.Series(index=performance.index, dtype="object"))
+        sentiment = sentiment.astype("object").where(sentiment.notna(), "").astype(str).str.strip().str.title()
+    returns = pd.to_numeric(performance.get("return_10d", pd.Series(index=performance.index, dtype=float)), errors="coerce")
+    positive = returns[sentiment.eq("Positive") & returns.notna()]
+    negative = returns[sentiment.eq("Negative") & returns.notna()]
+    if len(positive) < H2_MIN_EVENTS or len(negative) < H2_MIN_EVENTS:
+        coverage = ""
+        if "analyzed_news_count" in performance.columns:
+            analysed_events = int(pd.to_numeric(performance["analyzed_news_count"], errors="coerce").fillna(0).gt(0).sum())
+            coverage = f"{len(performance)} 個事件中 {analysed_events} 個有已分析新聞，其餘為未分析或無新聞。"
+        return {
+            "title": title,
+            "status": "資料不足",
+            "basis": (
+                f"Positive 事件 {len(positive)} 個、Negative 事件 {len(negative)} 個"
+                f"（各需至少 {H2_MIN_EVENTS} 個有 10 日報酬的事件）；{coverage}樣本不足，無法比較。"
+            ),
+        }
+    positive_mean, negative_mean = float(positive.mean()), float(negative.mean())
+    return {
+        "title": title,
+        "status": "成立" if positive_mean > negative_mean else "不成立",
+        "basis": (
+            f"Positive 事件 {len(positive)} 個，平均 10 日報酬 {positive_mean * 100:.1f}%；"
+            f"Negative 事件 {len(negative)} 個，平均 10 日報酬 {negative_mean * 100:.1f}%。"
+        ),
+    }
+
+
 def build_hypothesis_validation(performance: pd.DataFrame) -> list[dict[str, str | float | int]]:
     validations: list[dict[str, str | float | int]] = []
     if performance.empty:
@@ -358,33 +412,7 @@ def build_hypothesis_validation(performance: pd.DataFrame) -> list[dict[str, str
         "basis": reason,
     })
 
-    positive_count = int((performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title() == "Positive").sum())
-    negative_count = int((performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title() == "Negative").sum())
-    if positive_count < 5 and negative_count < 5:
-        validations.append({
-            "title": "假說2：正面新聞影響大於負面新聞。",
-            "status": "資料不足",
-            "basis": "Positive 與 Negative 樣本數均不足，無法比較不同情緒的市場效應。",
-        })
-    else:
-        positive_group = performance[performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title().eq("Positive")]
-        negative_group = performance[performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title().eq("Negative")]
-        pos_mean = positive_group["return_10d"].mean() if not positive_group.empty else float("nan")
-        neg_mean = negative_group["return_10d"].mean() if not negative_group.empty else float("nan")
-        if pd.isna(pos_mean) or pd.isna(neg_mean):
-            status = "資料不足"
-            basis = "Positive 或 Negative 樣本數不足。"
-        elif pos_mean > neg_mean:
-            status = "成立"
-            basis = f"Positive 事件平均 10 日報酬為 {pos_mean * 100:.1f}%；Negative 事件平均 10 日報酬為 {neg_mean * 100:.1f}% 。"
-        else:
-            status = "不成立"
-            basis = f"Positive 事件平均 10 日報酬為 {pos_mean * 100:.1f}%；Negative 事件平均 10 日報酬為 {neg_mean * 100:.1f}% 。"
-        validations.append({
-            "title": "假說2：正面新聞影響大於負面新聞。",
-            "status": status,
-            "basis": basis,
-        })
+    validations.append(_validate_sentiment_hypothesis(performance))
 
     if "theme" in performance.columns and performance["theme"].notna().any():
         grouped = performance.groupby("theme")["reaction_days"].apply(lambda values: pd.to_numeric(values, errors="coerce").dropna()[(pd.to_numeric(values, errors="coerce").dropna() >= 0) & (pd.to_numeric(values, errors="coerce").dropna() <= 30)].mean())
