@@ -25,3 +25,6 @@ __pycache__/
 
 # 視情況忽略原始 sql 資料檔 (若為機密資料請解除下方註解)
 # raw_data/*.sql
+
+# Gemini 續跑進度檔寫入時的暫存檔
+*.gemini_progress.json.tmp

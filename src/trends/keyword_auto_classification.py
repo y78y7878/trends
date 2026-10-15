@@ -17,6 +17,7 @@ from trends.database import (
     get_engine,
     init_db,
 )
+from trends.gemini_control import GeminiProgress
 from trends.keyword_classification import GeminiKeywordClassifier
 
 ALLOWED_THEMES = (
@@ -68,7 +69,7 @@ def _validate_prediction(keyword: str, payload: dict[str, Any] | None) -> dict[s
     }
 
 
-def get_unclassified_keywords(engine: Engine, limit: int = 100) -> list[str]:
+def get_unclassified_keywords(engine: Engine, limit: int = 100, exclude: set[str] | None = None) -> list[str]:
     db_engine = init_db(engine)
     with db_engine.connect() as connection:
         rows = connection.execute(
@@ -87,9 +88,9 @@ def get_unclassified_keywords(engine: Engine, limit: int = 100) -> list[str]:
             )
             .group_by(GoogleTrend.keyword)
             .order_by(func.count(GoogleTrend.id).desc())
-            .limit(limit if limit > 0 else 100)
         ).all()
-    return [str(row.keyword) for row in rows]
+    keywords = [str(row.keyword) for row in rows if str(row.keyword) not in (exclude or set())]
+    return keywords[:limit if limit > 0 else 100]
 
 
 def _upsert_keyword_classification(db_engine: Engine, result: dict[str, Any]) -> None:
@@ -143,7 +144,9 @@ def auto_classify_unclassified_keywords(
     classifier: GeminiKeywordClassifier | None = None,
 ) -> int:
     db_engine = init_db(engine or get_engine())
-    keywords = get_unclassified_keywords(db_engine, limit=limit)
+    # Resume: a keyword answered once keeps theme 「其他」 and would top this list on every run.
+    progress = GeminiProgress.for_engine(db_engine)
+    keywords = get_unclassified_keywords(db_engine, limit=limit, exclude=progress.done("auto_quality"))
     if not keywords:
         return 0
 
@@ -153,6 +156,7 @@ def auto_classify_unclassified_keywords(
             ai_classifier = GeminiKeywordClassifier()
         except RuntimeError as error:
             raise RuntimeError("未設定 GEMINI_API_KEY 或 GOOGLE_API_KEY，無法自動分類未分類關鍵字") from error
+        ai_classifier.task = "auto_quality"
 
     processed = 0
     for start in range(0, len(keywords), 20):
@@ -162,6 +166,7 @@ def auto_classify_unclassified_keywords(
         except Exception as error:  # pragma: no cover - network/API failure path
             print(f"Auto keyword classification batch failed ({len(batch)} keywords): {error}")
             break
+        progress.mark("auto_quality", [keyword for keyword in batch if keyword in predictions])
         for keyword in batch:
             payload = predictions.get(keyword) or {}
             result = _validate_prediction(keyword, payload if isinstance(payload, dict) else {})

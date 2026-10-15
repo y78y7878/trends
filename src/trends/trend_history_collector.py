@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 import pandas as pd
 from apscheduler.schedulers.blocking import BlockingScheduler
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
@@ -38,26 +40,104 @@ def save_history(engine: Engine, theme_name: str, keyword: str, history: pd.Data
     return len(records)
 
 
-def collect_trend_history(
+EXIT_RATE_LIMITED = 3
+
+
+@dataclass
+class HistoryRunResult:
+    rows: int = 0
+    success: int = 0
+    failed: int = 0
+    skipped: int = 0
+    not_attempted: int = 0
+    rate_limited: bool = False
+
+    def summary(self) -> str:
+        status = "Stopped: Google Trends rate limited (HTTP 429)" if self.rate_limited else "Completed"
+        return (
+            f"{status}\n"
+            f"Success: {self.success}\n"
+            f"Failed: {self.failed}\n"
+            f"Skipped: {self.skipped}\n"
+            f"Not attempted: {self.not_attempted}\n"
+            f"Rows written: {self.rows}"
+        )
+
+
+def _log(level: str, message: str) -> None:
+    print(f"[{level}] {message}", flush=True)
+
+
+def _is_rate_limited(error: Exception) -> bool:
+    # pytrends raises TooManyRequestsError (a ResponseError carrying the HTTP response) on 429.
+    return getattr(getattr(error, "response", None), "status_code", None) == 429
+
+
+def run_history_collection(
     engine: Engine | None = None,
     days: int = 90,
     request_delay: float = 1.5,
     trend_client=None,
     classify_keywords: bool = True,
-) -> int:
+) -> HistoryRunResult:
     db_engine = init_db(engine or get_engine())
     if classify_keywords:
         classify_pending_keywords(db_engine, limit=200)
     sync_theme_mapping(db_engine)
     with db_engine.connect() as connection:
         mappings = pd.read_sql(
-            select(ThemeMapping.theme_name, ThemeMapping.keyword).distinct().order_by(
-                ThemeMapping.theme_name, ThemeMapping.keyword
-            ).where(ThemeMapping.active == 1),
+            select(
+                ThemeMapping.theme_name,
+                ThemeMapping.keyword,
+                func.max(case((func.coalesce(ThemeMapping.stock_id, "") != "", 1), else_=0)).label("has_stock"),
+            )
+            .where(ThemeMapping.active == 1)
+            .group_by(ThemeMapping.theme_name, ThemeMapping.keyword)
+            .order_by(ThemeMapping.theme_name, ThemeMapping.keyword),
             connection,
         )
+        latest = pd.read_sql(
+            select(
+                GoogleTrendsHistory.theme_name,
+                GoogleTrendsHistory.keyword,
+                func.max(GoogleTrendsHistory.trend_date).label("latest_date"),
+            ).group_by(GoogleTrendsHistory.theme_name, GoogleTrendsHistory.keyword),
+            connection,
+        )
+    outcome = HistoryRunResult()
     if mappings.empty:
-        return 0
+        _log("INFO", "no active theme keywords; nothing to collect")
+        return outcome
+
+    end_date = date.today()
+    start_date = end_date - timedelta(days=max(days - 1, 0))
+    timeframe = f"{start_date.isoformat()} {end_date.isoformat()}"
+    # Today's point is partial and dropped, so a keyword whose history reaches yesterday is current.
+    up_to_date_since = end_date - timedelta(days=1)
+    latest_dates = {
+        (row.theme_name, row.keyword): pd.to_datetime(row.latest_date).date()
+        for row in latest.itertuples(index=False)
+        if pd.notna(row.latest_date)
+    }
+    pending = []
+    for row in mappings.itertuples(index=False):
+        latest_date = latest_dates.get((row.theme_name, row.keyword))
+        if latest_date is not None and latest_date >= up_to_date_since:
+            _log("SKIP", f"keyword={row.keyword} theme={row.theme_name} already updated (latest={latest_date})")
+            outcome.skipped += 1
+        else:
+            pending.append(row)
+    if not pending:
+        return outcome
+    # Rotation: a run usually ends at Google's first 429 after ~25-100 keywords, so query the
+    # stalest (never collected first) and, among equally stale ones, keywords mapped to a stock.
+    # Alphabetical order kept re-querying the same 「其他」 keywords and starved the rest.
+    pending.sort(key=lambda row: (
+        latest_dates.get((row.theme_name, row.keyword), date.min),
+        -int(row.has_stock),
+        row.theme_name,
+        row.keyword,
+    ))
 
     if trend_client is None:
         from pytrends.request import TrendReq
@@ -68,36 +148,67 @@ def collect_trend_history(
             timeout=(10, 30),
         )
 
-    end_date = date.today()
-    start_date = end_date - timedelta(days=max(days - 1, 0))
-    timeframe = f"{start_date.isoformat()} {end_date.isoformat()}"
-    written = 0
-    for row in mappings.itertuples(index=False):
+    for index, row in enumerate(pending):
         for attempt in range(3):
             try:
                 trend_client.build_payload([row.keyword], timeframe=timeframe, geo="TW")
                 result = trend_client.interest_over_time()
+                written = 0
                 if not result.empty and row.keyword in result:
-                    history = result[[row.keyword]].rename(columns={row.keyword: "trend_score"}).reset_index()
+                    columns = [row.keyword, "isPartial"] if "isPartial" in result else [row.keyword]
+                    history = result[columns].rename(columns={row.keyword: "trend_score"}).reset_index()
                     history = history.rename(columns={history.columns[0]: "trend_date"})
                     if "isPartial" in history:
                         history = history[~history["isPartial"].astype(bool)]
-                    written += save_history(db_engine, row.theme_name, row.keyword, history)
+                    written = save_history(db_engine, row.theme_name, row.keyword, history)
+                outcome.rows += written
+                outcome.success += 1
+                _log("INFO", f"keyword={row.keyword} theme={row.theme_name} success rows={written}")
                 break
             except Exception as error:
+                if _is_rate_limited(error):
+                    # Retrying or moving on to the next keyword only prolongs Google's block.
+                    outcome.failed += 1
+                    outcome.rate_limited = True
+                    outcome.not_attempted = len(pending) - index - 1
+                    _log("ERROR", f"keyword={row.keyword} theme={row.theme_name} rate limited; stopping run")
+                    return outcome
                 if attempt == 2:
-                    print(f"Failed to collect {row.theme_name}/{row.keyword}: {error}")
+                    outcome.failed += 1
+                    _log("ERROR", f"keyword={row.keyword} theme={row.theme_name} failed: {error}")
                 else:
                     time.sleep(2 ** (attempt + 1))
         if request_delay > 0:
             time.sleep(request_delay)
-    return written
+    return outcome
+
+
+def collect_trend_history(
+    engine: Engine | None = None,
+    days: int = 90,
+    request_delay: float = 1.5,
+    trend_client=None,
+    classify_keywords: bool = True,
+) -> int:
+    return run_history_collection(
+        engine,
+        days=days,
+        request_delay=request_delay,
+        trend_client=trend_client,
+        classify_keywords=classify_keywords,
+    ).rows
+
+
+def collect_and_report(**kwargs) -> HistoryRunResult:
+    outcome = run_history_collection(**kwargs)
+    print(outcome.summary(), flush=True)
+    return outcome
 
 
 def schedule_daily_collection() -> None:
     scheduler = BlockingScheduler(timezone="Asia/Taipei")
     scheduler.add_job(
-        collect_trend_history,
+        collect_and_report,
         "cron",
         hour=19,
         minute=0,
@@ -105,7 +216,7 @@ def schedule_daily_collection() -> None:
         max_instances=1,
         coalesce=True,
     )
-    print(f"Initial history load wrote {collect_trend_history():,} rows")
+    collect_and_report()
     scheduler.start()
 
 
@@ -116,4 +227,4 @@ if __name__ == "__main__":
     if args.schedule:
         schedule_daily_collection()
     else:
-        print(f"已寫入 {collect_trend_history():,} 筆歷史熱度")
+        sys.exit(EXIT_RATE_LIMITED if collect_and_report().rate_limited else 0)

@@ -22,6 +22,7 @@ from trends.database import (
     get_engine,
     init_db,
 )
+from trends.gemini_control import GeminiProgress, should_stop_batches
 from trends.keyword_classification import ALLOWED_THEMES, _generate_json
 from trends.keyword_mapping import load_keyword_mapping
 from trends.theme_study import normalize_theme_name
@@ -93,7 +94,7 @@ confidence_score 範圍為 0 到 1。無法辨識時 entity_type 填「其他」
 每個關鍵字一筆，輸出 JSON：{{"items":[{{"keyword":"","canonical_entity":"","entity_type":"","stock_id":"","industry":"","theme_name":"","confidence_score":0.0}}]}}
 關鍵字：{json.dumps(keywords, ensure_ascii=False)}
 """
-        payload = _generate_json(self._client, self._model, prompt)
+        payload = _generate_json(self._client, self._model, prompt, task="entity", items=len(keywords))
         return {
             str(item.get("keyword", "")): item
             for item in payload.get("items", [])
@@ -351,39 +352,52 @@ class EntityResolver:
                 .distinct()
                 .order_by(GoogleTrend.keyword)
             )
-            if limit > 0:
-                statement = statement.limit(limit)
             keywords = [str(keyword) for keyword in connection.execute(statement).scalars()]
 
         if not keywords:
             return 0
-        saved = 0
         size = max(batch_size, 1)
-        for start in range(0, len(keywords), size):
-            batch = keywords[start:start + size]
-            results: list[tuple[str, dict[str, object]]] = []
-            unresolved = []
-            for keyword in batch:
-                known = self._resolve_known_company(keyword) or self._resolve_industry(keyword)
-                if known is None:
-                    unresolved.append(keyword)
-                else:
-                    results.append((keyword, known))
+        # Seed and industry rules cost nothing, so they run on every pending keyword. ``limit``
+        # bounds only the Gemini-bound remainder; capping the whole list let a stuck alphabetical
+        # prefix hide seed companies further down whenever Gemini was unavailable.
+        known_results: list[tuple[str, dict[str, object]]] = []
+        unresolved_all: list[str] = []
+        for keyword in keywords:
+            known = self._resolve_known_company(keyword) or self._resolve_industry(keyword)
+            if known is None:
+                unresolved_all.append(keyword)
+            else:
+                known_results.append((keyword, known))
+        saved = 0
+        for start in range(0, len(known_results), size):
+            saved += self._save_batch(known_results[start:start + size])
 
-            classifier = self._get_classifier() if unresolved else None
-            if unresolved and classifier is not None:
-                try:
-                    predictions = classifier.classify_batch(unresolved)
-                except Exception as error:
-                    print(f"Entity AI batch failed ({len(unresolved)} keywords): {error}")
-                    if "quota exceeded" in str(error).casefold() and ("perday" in str(error).casefold() or "per day" in str(error).casefold()):
-                        saved += self._save_batch(results)
-                        break
-                    predictions = {}
-                for keyword in unresolved:
-                    result = self._normalize_prediction(predictions.get(keyword, {}))
-                    if result is not None:
-                        results.append((keyword, result))
+        # Resume: keywords Gemini already answered stay pending when it found no entity (or the
+        # theme stays 「其他」); never re-send them.
+        progress = GeminiProgress.for_engine(self.engine)
+        done = progress.done("entity")
+        unresolved_all = [keyword for keyword in unresolved_all if keyword not in done]
+        if limit > 0:
+            unresolved_all = unresolved_all[:limit]
+        classifier = self._get_classifier() if unresolved_all else None
+        if classifier is None:
+            return saved
+        for start in range(0, len(unresolved_all), size):
+            unresolved = unresolved_all[start:start + size]
+            try:
+                predictions = classifier.classify_batch(unresolved)
+            except Exception as error:
+                print(f"Entity AI batch failed ({len(unresolved)} keywords): {error}")
+                if should_stop_batches(error):
+                    break
+                continue
+            # Only keywords Gemini actually answered count as done; omitted ones retry next run.
+            progress.mark("entity", [keyword for keyword in unresolved if keyword in predictions])
+            results = []
+            for keyword in unresolved:
+                result = self._normalize_prediction(predictions.get(keyword, {}))
+                if result is not None:
+                    results.append((keyword, result))
             saved += self._save_batch(results)
         return saved
 

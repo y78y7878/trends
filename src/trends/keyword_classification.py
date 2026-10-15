@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 from pathlib import Path
 from typing import Protocol
 
@@ -20,6 +19,7 @@ from trends.database import (
     ThemeMapping,
     init_db,
 )
+from trends.gemini_control import GeminiProgress, get_gemini_limiter, is_daily_quota_error, should_stop_batches
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
 from trends.theme_study import THEME_DEFINITIONS, load_theme_mapping, normalize_theme_name
 
@@ -32,37 +32,31 @@ BATCH_SIZE = 20
 
 
 def _daily_quota_exhausted(error: Exception) -> bool:
-    message = str(error).casefold()
-    return "quota exceeded" in message and ("perday" in message or "per day" in message)
+    return is_daily_quota_error(error)
 
 
 class KeywordBatchClassifier(Protocol):
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]: ...
 
 
-def _generate_json(client, model: str, prompt: str) -> dict[str, object]:
+def _generate_json(client, model: str, prompt: str, task: str = "gemini", items: int = 0) -> dict[str, object]:
     from google.genai import types
 
-    for attempt in range(4):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
-            )
-            payload = json.loads(response.text or "{}")
-            return payload if isinstance(payload, dict) else {}
-        except Exception as error:
-            status_code = getattr(error, "status_code", None)
-            if status_code == 429 and _daily_quota_exhausted(error):
-                raise
-            if status_code not in {429, 500, 502, 503, 504} or attempt == 3:
-                raise
-            time.sleep(2 ** attempt)
-    return {}
+    # Every Gemini request shares one limiter: 5 per minute, 429/5xx retry policy, run stats.
+    limiter = get_gemini_limiter()
+    response = limiter.call(lambda: client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    ))
+    payload = json.loads(response.text or "{}")
+    limiter.stats.record_processed(task, items)
+    return payload if isinstance(payload, dict) else {}
 
 
 class GeminiKeywordClassifier:
+    task = "keyword"
+
     def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
@@ -84,7 +78,7 @@ sub_theme 使用簡短繁體中文分類；stock_related 只能為 0 或 1；con
 只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","stock_related":0,"confidence_score":0.0}}]}}。
 輸入：{json.dumps(keywords, ensure_ascii=False)}
 """
-        payload = _generate_json(self._client, self._model, prompt)
+        payload = _generate_json(self._client, self._model, prompt, task=self.task, items=len(keywords))
         return {
             str(item.get("keyword", "")): item
             for item in payload.get("items", [])
@@ -112,7 +106,7 @@ event_type 只能是：{', '.join(EVENT_TYPES)}。
 只輸出 JSON {{"items":[{{"news_id":1,"news_sentiment":"Neutral","sentiment_score":0.5,"event_type":"產業趨勢"}}]}}。
 新聞資料：{json.dumps(articles, ensure_ascii=False, default=str)}
 """
-        payload = _generate_json(self._client, self._model, prompt)
+        payload = _generate_json(self._client, self._model, prompt, task="news", items=len(articles))
         return {
             int(item["news_id"]): item
             for item in payload.get("items", [])
@@ -268,6 +262,7 @@ def classify_pending_keywords(
                 KeywordClassification.theme_name == "其他",
             ),
         )
+    progress = GeminiProgress.for_engine(db_engine)
     with db_engine.connect() as connection:
             statement = (
                 select(GoogleTrend.keyword)
@@ -276,9 +271,14 @@ def classify_pending_keywords(
                 .distinct()
                 .order_by(GoogleTrend.keyword)
             )
-            if limit > 0:
-                statement = statement.limit(limit)
             keywords = connection.execute(statement).scalars().all()
+    if ai_classifier is not None:
+        # Resume: keywords Gemini already answered stay out, even if a later step put them back
+        # into the pending set, so an interrupted backlog continues where it stopped.
+        done = progress.done("keyword")
+        keywords = [keyword for keyword in keywords if str(keyword) not in done]
+    if limit > 0:
+        keywords = keywords[:limit]
     if not keywords:
         return 0
 
@@ -287,16 +287,19 @@ def classify_pending_keywords(
         batch = [str(keyword) for keyword in keywords[start:start + max(batch_size, 1)]]
         predictions: dict[str, dict[str, object]] = {}
         ai_failed = False
-        daily_quota_hit = False
+        stop_run = False
         if ai_classifier is not None:
             try:
                 predictions = ai_classifier.classify_batch(batch)
             except Exception as error:
                 print(f"Keyword AI batch failed ({len(batch)} keywords): {error}")
                 ai_failed = True
-                daily_quota_hit = _daily_quota_exhausted(error)
+                stop_run = should_stop_batches(error)
+            else:
+                # Only keywords Gemini actually answered count as done; omitted ones retry next run.
+                progress.mark("keyword", [keyword for keyword in batch if keyword in predictions])
         if ai_failed:
-            if daily_quota_hit:
+            if stop_run:
                 break
             continue
         rows = []
@@ -361,7 +364,7 @@ def classify_pending_news(
             predictions = ai_classifier.classify_batch(batch)
         except Exception as error:
             print(f"News AI batch failed ({len(batch)} articles): {error}")
-            if _daily_quota_exhausted(error):
+            if should_stop_batches(error):
                 break
             continue
         updates = []

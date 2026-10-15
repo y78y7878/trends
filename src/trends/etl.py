@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -21,6 +22,7 @@ from trends.database import (
     init_db,
 )
 from trends.entity_resolution_etl import run_entity_resolution_etl
+from trends.gemini_control import reset_gemini_limiter
 from trends.keyword_auto_classification import (
     auto_classify_unclassified_keywords,
     classify_pending_news_theme,
@@ -226,6 +228,8 @@ def get_system_status(engine: Engine) -> dict[str, object]:
 
 def run_full_update(engine: Engine | None = None) -> dict[str, int]:
     db_engine = init_db(engine or get_engine())
+    # Fresh per-minute window, retry state and stats for this run (the Dashboard process is long-lived).
+    reset_gemini_limiter()
     from trends.stock_collector import fetch_and_store
 
     stock_rows = fetch_and_store(engine=db_engine)
@@ -245,6 +249,12 @@ def run_full_update(engine: Engine | None = None) -> dict[str, int]:
     }
 
 
+# Items per Gemini request in the daily ETL. Titles and keywords are short, so 50 fit easily in one
+# prompt and response; larger batches mean 2.5x more items per request under the free tier's
+# per-minute and per-day request quotas.
+GEMINI_BATCH_SIZE = 50
+
+
 def run_daily_etl(
     engine: Engine | None = None,
     keyword_limit: int = 200,
@@ -252,33 +262,54 @@ def run_daily_etl(
     history_days: int = 90,
 ) -> dict[str, int]:
     db_engine = init_db(engine or get_engine())
+    gemini = reset_gemini_limiter()
     mapping_rows = sync_theme_mapping(db_engine)
-    entity_rows = run_entity_resolution_etl(db_engine, limit=keyword_limit)
-    keyword_rows = classify_pending_keywords(db_engine, limit=keyword_limit, resolve_entities=False)
-    quality_rows = 0
+    # Gemini steps must never block trend history and theme stats below: each step stops on its
+    # own when the shared limiter gives up, and any unexpected error is logged and skipped.
+    entity_rows = keyword_rows = quality_rows = 0
+    try:
+        entity_rows = run_entity_resolution_etl(db_engine, limit=keyword_limit, batch_size=GEMINI_BATCH_SIZE)
+    except Exception as error:
+        print(f"Entity resolution skipped: {error}")
+    try:
+        keyword_rows = classify_pending_keywords(
+            db_engine, limit=keyword_limit, resolve_entities=False, batch_size=GEMINI_BATCH_SIZE
+        )
+    except Exception as error:
+        print(f"Keyword classification skipped: {error}")
     try:
         quality_rows = auto_classify_unclassified_keywords(db_engine, limit=100)
     except RuntimeError as error:
         print(f"Auto keyword classification skipped: {error}")
-    from trends.trend_history_collector import collect_trend_history
+    from trends.trend_history_collector import run_history_collection
 
-    history_rows = collect_trend_history(db_engine, days=history_days, classify_keywords=False)
+    # A 429 stops only the history step; classification and stats below still run.
+    history = run_history_collection(db_engine, days=history_days, classify_keywords=False)
+    print(history.summary(), flush=True)
     try:
-        news_rows = classify_pending_news(db_engine, limit=news_limit)
+        news_rows = classify_pending_news(db_engine, limit=news_limit, batch_size=GEMINI_BATCH_SIZE)
     except RuntimeError as error:
         print(f"News AI classification skipped: {error}")
         news_rows = 0
     theme_news_rows = classify_pending_news_theme(db_engine, limit=max(200, news_limit))
     stats_rows = refresh_theme_daily_stats(db_engine)
+    status = get_system_status(db_engine)
+    print(gemini.stats.report(skipped={
+        "keywords": int(status["unclassified_keywords"]),
+        "news": int(status["unanalyzed_news"]),
+    }), flush=True)
     return {
         "mapping_rows": mapping_rows,
         "resolved_entities": entity_rows,
         "classified_keywords": keyword_rows,
         "quality_classified_keywords": quality_rows,
-        "history_rows": history_rows,
+        "history_rows": history.rows,
+        "history_rate_limited": history.rate_limited,
         "classified_news": news_rows,
         "classified_news_theme": theme_news_rows,
         "daily_stat_themes": stats_rows,
+        "gemini_requests": gemini.stats.requests,
+        "gemini_stopped": gemini.stats.stopped_reason,
     }
 
 
@@ -313,3 +344,7 @@ if __name__ == "__main__":
             history_days=args.history_days,
         )
         print(f"Theme ETL completed: {result}")
+        if result["history_rate_limited"]:
+            from trends.trend_history_collector import EXIT_RATE_LIMITED
+
+            sys.exit(EXIT_RATE_LIMITED)
