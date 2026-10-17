@@ -75,7 +75,10 @@ foreach ($task in $tasks) {
         Write-Host "skip     $TaskPath$($task.Name) (already registered; use -Force to overwrite)"
         continue
     }
-    $action = New-ScheduledTaskAction -Execute (Join-Path $ProjectDir $task.Script) -WorkingDirectory $ProjectDir
+    # Launch through wscript + run_hidden.vbs so no console window pops up on every run.
+    $launcher = Join-Path $PSScriptRoot 'run_hidden.vbs'
+    $action = New-ScheduledTaskAction -Execute 'wscript.exe' `
+        -Argument "//B //Nologo `"$launcher`" `"$(Join-Path $ProjectDir $task.Script)`"" -WorkingDirectory $ProjectDir
     Register-ScheduledTask -TaskPath $TaskPath -TaskName $task.Name -Description $task.Description `
         -Action $action -Trigger $task.Trigger -Settings $task.Settings -Force | Out-Null
     Write-Host "register $TaskPath$($task.Name) -> $($task.Script)"
