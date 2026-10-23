@@ -121,7 +121,7 @@ Dashboard 只讀取資料庫，不負責定期更新；資料由排程工作寫�
 ```text
 Windows 工作排程器 \Trends\
 │
-├─ RSS Collector    每 10 分鐘        run.bat
+├─ RSS Collector    每 20 分鐘        run.bat
 │    └─ trends.rss_collector --once
 │         → google_trends、google_trends_news
 │
@@ -161,8 +161,8 @@ Streamlit Dashboard（app.py）── 唯讀查詢 data.db（快取 5 分鐘）
 
 | 資料表 | 來源 | 更新頻率 | 更新程式 | 每次處理範圍 | 缺口回補 |
 |---|---|---|---|---|---|
-| `google_trends` | Google Trends 台灣 RSS | 每 10 分鐘 | `run.bat` | RSS 當下約 10 筆熱搜 | 無法回補；RSS 只提供當下熱搜 |
-| `google_trends_news` | RSS 內附新聞 | 每 10 分鐘 | `run.bat` | 隨熱搜一併收集 | 同上 |
+| `google_trends` | Google Trends 台灣 RSS | 每 20 分鐘 | `run.bat` | RSS 當下約 10 筆熱搜 | 無法回補；RSS 只提供當下熱搜 |
+| `google_trends_news` | RSS 內附新聞 | 每 20 分鐘 | `run.bat` | 隨熱搜一併收集 | 同上 |
 | `stocks` | yfinance 日線 | 交易日 18:30 | `run_stocks.bat` | 每檔最近 14 天（新股票回補 5 年） | 自動；缺口不超過 14 天 |
 | `google_trends_history` | pytrends 每日熱度 | 每天 4 次 | `run_etl.bat` | 啟用主題關鍵字的近 90 天，最久未更新的優先（同樣久時有對應股票的優先），到第一個 429 為止 | 自動；缺口不超過 90 天 |
 | `keyword_classification`、`entity_master`、`theme_mapping` | Gemini + 規則 | 每天 4 次 | `run_etl.bat` | 種子與產業規則套用到全部待處理關鍵字；Gemini 每次最多 400 個 | 積壓會在之後幾次執行中消化 |
@@ -171,7 +171,7 @@ Streamlit Dashboard（app.py）── 唯讀查詢 data.db（快取 5 分鐘）
 | `theme_daily_stats` | 由上列資料表彙總 | 每天 4 次 | `run_etl.bat` | 重算主題每日統計 | 自動 |
 | 事件研究結果 | 由上列資料表即時計算 | 開啟頁面時 | Dashboard | 依頁面選擇的主題、股票與日期 | 不需要 |
 
-資料新鮮度的預期：熱搜與新聞延遲約 10 分鐘；股價為前一個交易日收盤（當天 18:30 後為當日收盤）；分類、情緒與歷史熱度最多落後約 6 小時（最近一次 ETL）。Google Trends 限流（HTTP 429）時，歷史熱度會暫停更新，限流解除後的第一次執行會自動補齊。
+資料新鮮度的預期：熱搜與新聞延遲約 20 分鐘；股價為前一個交易日收盤（當天 18:30 後為當日收盤）；分類、情緒與歷史熱度最多落後約 6 小時（最近一次 ETL）。Google Trends 限流（HTTP 429）時，歷史熱度會暫停更新，限流解除後的第一次執行會自動補齊。
 
 主題、關鍵字與股票對應維護於 `theme_mapping.csv`；股票與公司別名維護於 `keyword_theme_mapping.csv` 及 `entity_seed_mapping.csv`。
 

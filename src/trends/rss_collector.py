@@ -10,7 +10,7 @@
 Usage::
 
     python -m trends.rss_collector --once        # one fetch, for Windows Task Scheduler (run.bat)
-    python -m trends.rss_collector --schedule    # long-running, every 10 minutes
+    python -m trends.rss_collector --schedule    # long-running, every 20 minutes
     python -m trends.rss_collector --once --db backups\\rehearsal_p0_1.db   # verify against a copy
 """
 from __future__ import annotations
@@ -35,7 +35,8 @@ from trends.timeutil import format_db_datetime, utc_now
 RSS_URL = "https://trends.google.com/trending/rss?geo=TW"
 NAMESPACES = {"ht": "https://trends.google.com/trending/rss"}
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-DEFAULT_INTERVAL_MINUTES = 10
+# The feed holds the newest 10 trends, each for about an hour; 20 minutes misses about 1% of them.
+DEFAULT_INTERVAL_MINUTES = 20
 
 logger = logging.getLogger(__name__)
 

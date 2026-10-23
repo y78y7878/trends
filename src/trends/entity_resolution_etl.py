@@ -22,7 +22,7 @@ from trends.database import (
     get_engine,
     init_db,
 )
-from trends.gemini_control import GeminiProgress, should_stop_batches
+from trends.gemini_control import GeminiProgress, gemini_models, should_stop_batches
 from trends.keyword_classification import ALLOWED_THEMES, _generate_json
 from trends.keyword_mapping import load_keyword_mapping
 from trends.theme_study import normalize_theme_name
@@ -74,7 +74,7 @@ class EntityBatchClassifier(Protocol):
 
 
 class GeminiEntityClassifier:
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not resolved_key:
@@ -82,7 +82,7 @@ class GeminiEntityClassifier:
         from google import genai
 
         self._client = genai.Client(api_key=resolved_key)
-        self._model = model
+        self._models = (model,) if model else gemini_models()
 
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]:
         prompt = f"""
@@ -94,7 +94,7 @@ confidence_score 範圍為 0 到 1。無法辨識時 entity_type 填「其他」
 每個關鍵字一筆，輸出 JSON：{{"items":[{{"keyword":"","canonical_entity":"","entity_type":"","stock_id":"","industry":"","theme_name":"","confidence_score":0.0}}]}}
 關鍵字：{json.dumps(keywords, ensure_ascii=False)}
 """
-        payload = _generate_json(self._client, self._model, prompt, task="entity", items=len(keywords))
+        payload = _generate_json(self._client, self._models, prompt, task="entity", items=len(keywords))
         return {
             str(item.get("keyword", "")): item
             for item in payload.get("items", [])

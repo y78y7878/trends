@@ -4,7 +4,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -19,7 +19,9 @@ from trends.database import (
     ThemeMapping,
     init_db,
 )
-from trends.gemini_control import GeminiProgress, get_gemini_limiter, is_daily_quota_error, should_stop_batches
+from trends.gemini_control import (
+    GeminiProgress, gemini_models, get_gemini_limiter, is_daily_quota_error, should_stop_batches,
+)
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
 from trends.theme_study import THEME_DEFINITIONS, load_theme_mapping, normalize_theme_name
 
@@ -39,16 +41,19 @@ class KeywordBatchClassifier(Protocol):
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]: ...
 
 
-def _generate_json(client, model: str, prompt: str, task: str = "gemini", items: int = 0) -> dict[str, object]:
+def _generate_json(
+    client, models: str | Sequence[str], prompt: str, task: str = "gemini", items: int = 0
+) -> dict[str, object]:
     from google.genai import types
 
-    # Every Gemini request shares one limiter: 5 per minute, 429/5xx retry policy, run stats.
+    # Every Gemini request shares one limiter: 5 per minute per model, 429/5xx retry policy,
+    # fallback to the next model, run stats.
     limiter = get_gemini_limiter()
-    response = limiter.call(lambda: client.models.generate_content(
+    response = limiter.call(lambda model: client.models.generate_content(
         model=model,
         contents=prompt,
         config=types.GenerateContentConfig(response_mime_type="application/json"),
-    ))
+    ), [models] if isinstance(models, str) else models)
     payload = json.loads(response.text or "{}")
     limiter.stats.record_processed(task, items)
     return payload if isinstance(payload, dict) else {}
@@ -57,7 +62,7 @@ def _generate_json(client, model: str, prompt: str, task: str = "gemini", items:
 class GeminiKeywordClassifier:
     task = "keyword"
 
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not resolved_key:
@@ -65,7 +70,7 @@ class GeminiKeywordClassifier:
         from google import genai
 
         self._client = genai.Client(api_key=resolved_key)
-        self._model = model
+        self._models = (model,) if model else gemini_models()
 
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]:
         prompt = f"""
@@ -78,7 +83,7 @@ sub_theme 使用簡短繁體中文分類；stock_related 只能為 0 或 1；con
 只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","stock_related":0,"confidence_score":0.0}}]}}。
 輸入：{json.dumps(keywords, ensure_ascii=False)}
 """
-        payload = _generate_json(self._client, self._model, prompt, task=self.task, items=len(keywords))
+        payload = _generate_json(self._client, self._models, prompt, task=self.task, items=len(keywords))
         return {
             str(item.get("keyword", "")): item
             for item in payload.get("items", [])
@@ -87,7 +92,7 @@ sub_theme 使用簡短繁體中文分類；stock_related 只能為 0 或 1；con
 
 
 class GeminiNewsClassifier:
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not resolved_key:
@@ -95,7 +100,7 @@ class GeminiNewsClassifier:
         from google import genai
 
         self._client = genai.Client(api_key=resolved_key)
-        self._model = model
+        self._models = (model,) if model else gemini_models()
 
     def classify_batch(self, articles: list[dict[str, object]]) -> dict[int, dict[str, object]]:
         prompt = f"""
@@ -106,7 +111,7 @@ event_type 只能是：{', '.join(EVENT_TYPES)}。
 只輸出 JSON {{"items":[{{"news_id":1,"news_sentiment":"Neutral","sentiment_score":0.5,"event_type":"產業趨勢"}}]}}。
 新聞資料：{json.dumps(articles, ensure_ascii=False, default=str)}
 """
-        payload = _generate_json(self._client, self._model, prompt, task="news", items=len(articles))
+        payload = _generate_json(self._client, self._models, prompt, task="news", items=len(articles))
         return {
             int(item["news_id"]): item
             for item in payload.get("items", [])

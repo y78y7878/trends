@@ -13,9 +13,11 @@ from sqlalchemy.engine import Engine
 from trends.database import GoogleTrend, GoogleTrendNews, KeywordClassification, get_engine, init_db
 from trends.entity_resolution_etl import EntityResolver
 from trends.gemini_control import (
+    DEFAULT_MODELS,
     GeminiLimiter,
     GeminiProgress,
     GeminiStopped,
+    gemini_models,
     get_gemini_limiter,
     reset_gemini_limiter,
     retry_delay_seconds,
@@ -53,8 +55,8 @@ class FakeClock:
 def failing(errors: list[Exception], result: str = "ok"):
     calls = []
 
-    def request():
-        calls.append(1)
+    def request(model):
+        calls.append(model)
         if errors:
             raise errors.pop(0)
         return result
@@ -67,6 +69,10 @@ class LimiterTestCase(TestCase):
         self.time = FakeClock()
         self.limiter = GeminiLimiter(clock=self.time.clock, sleep=self.time.sleep)
 
+    def call(self, request, limiter: GeminiLimiter | None = None):
+        """Single-model call: retry and stop rules without fallback."""
+        return (limiter or self.limiter).call(request, ["m"])
+
     def tearDown(self) -> None:
         reset_gemini_limiter()
 
@@ -75,7 +81,7 @@ class RateLimitRetryTests(LimiterTestCase):
     def test_429_waits_for_server_retry_delay_then_succeeds(self) -> None:
         request, calls = failing([FakeAPIError(429, retry_delay="29s")])
 
-        self.assertEqual(self.limiter.call(request), "ok")
+        self.assertEqual(self.call(request), "ok")
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(self.time.sleeps, [29.0])
@@ -85,7 +91,7 @@ class RateLimitRetryTests(LimiterTestCase):
     def test_429_without_retry_delay_waits_at_least_60_seconds(self) -> None:
         request, _ = failing([FakeAPIError(429)])
 
-        self.limiter.call(request)
+        self.call(request)
 
         self.assertEqual(self.time.sleeps, [60.0])
 
@@ -93,7 +99,7 @@ class RateLimitRetryTests(LimiterTestCase):
         request, calls = failing([FakeAPIError(429, retry_delay="1s") for _ in range(4)])
 
         with self.assertRaises(GeminiStopped):
-            self.limiter.call(request)
+            self.call(request)
 
         self.assertEqual(len(calls), 4)
         self.assertTrue(self.limiter.stopped)
@@ -102,7 +108,7 @@ class RateLimitRetryTests(LimiterTestCase):
         request, calls = failing([FakeAPIError(429, retry_delay="30s", quota_id="GenerateRequestsPerDayPerProject")])
 
         with self.assertRaises(GeminiStopped):
-            self.limiter.call(request)
+            self.call(request)
 
         self.assertEqual((len(calls), self.time.sleeps), (1, []))
 
@@ -111,7 +117,7 @@ class RateLimitRetryTests(LimiterTestCase):
         request, calls = failing([])
 
         with self.assertRaises(GeminiStopped):
-            self.limiter.call(request)
+            self.call(request)
 
         self.assertEqual(calls, [])
 
@@ -125,59 +131,133 @@ class RateLimitRetryTests(LimiterTestCase):
         request, _ = failing([FakeAPIError(429, retry_delay="45s")])
 
         with self.assertRaises(GeminiStopped):
-            limiter.call(request)
+            self.call(request, limiter)
 
         self.assertEqual(self.time.sleeps, [])
 
 
 class ServerErrorRetryTests(LimiterTestCase):
-    def test_503_uses_exponential_backoff(self) -> None:
-        request, calls = failing([FakeAPIError(503), FakeAPIError(503)])
+    def test_503_retries_once_after_10_seconds(self) -> None:
+        request, calls = failing([FakeAPIError(503)])
 
-        self.assertEqual(self.limiter.call(request), "ok")
+        self.assertEqual(self.call(request), "ok")
 
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(self.time.sleeps, [5.0, 10.0])
-        self.assertEqual(self.limiter.stats.server_errors, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.time.sleeps, [10.0])
+        self.assertEqual(self.limiter.stats.server_errors, 1)
 
-    def test_503_stops_after_three_retries(self) -> None:
-        request, calls = failing([FakeAPIError(503) for _ in range(4)])
+    def test_503_gives_up_on_the_model_after_one_retry(self) -> None:
+        request, calls = failing([FakeAPIError(503) for _ in range(3)])
 
         with self.assertRaises(GeminiStopped):
-            self.limiter.call(request)
+            self.call(request)
 
-        self.assertEqual(len(calls), 4)
-        self.assertEqual(self.time.sleeps, [5.0, 10.0, 20.0])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.time.sleeps, [10.0])
+        self.assertIn("m HTTP 503 after retries", self.limiter.stats.stopped_reason)
 
     def test_other_errors_are_not_retried(self) -> None:
         request, calls = failing([ValueError("bad json")])
 
         with self.assertRaises(ValueError):
-            self.limiter.call(request)
+            self.call(request)
 
         self.assertEqual((len(calls), self.time.sleeps), (1, []))
         self.assertFalse(self.limiter.stopped)
 
 
+class ModelFallbackTests(LimiterTestCase):
+    def test_daily_quota_moves_the_same_request_to_the_next_model(self) -> None:
+        request, calls = failing([FakeAPIError(429, quota_id="GenerateRequestsPerDayPerProject")])
+
+        self.assertEqual(self.limiter.call(request, ["a", "b"]), "ok")
+
+        self.assertEqual(calls, ["a", "b"])
+        self.assertEqual(self.time.sleeps, [])
+        self.assertFalse(self.limiter.stopped)
+        self.assertEqual(self.limiter.unavailable, {"a": "daily quota exhausted"})
+
+    def test_overloaded_model_falls_back_after_one_retry(self) -> None:
+        request, calls = failing([FakeAPIError(503), FakeAPIError(503)])
+
+        self.assertEqual(self.limiter.call(request, ["a", "b"]), "ok")
+
+        self.assertEqual(calls, ["a", "a", "b"])
+        self.assertEqual(self.time.sleeps, [10.0])
+
+    def test_unavailable_model_is_skipped_for_the_rest_of_the_run(self) -> None:
+        request, calls = failing([FakeAPIError(429, quota_id="GenerateRequestsPerDayPerProject")])
+        self.limiter.call(request, ["a", "b"])
+
+        self.limiter.call(request, ["a", "b"])
+
+        self.assertEqual(calls, ["a", "b", "b"])
+
+    def test_missing_model_falls_back(self) -> None:
+        request, calls = failing([FakeAPIError(404)])
+
+        self.assertEqual(self.limiter.call(request, ["typo", "b"]), "ok")
+
+        self.assertEqual(calls, ["typo", "b"])
+
+    def test_stops_when_every_model_is_out(self) -> None:
+        daily = lambda: FakeAPIError(429, quota_id="GenerateRequestsPerDayPerProject")
+        request, calls = failing([daily(), FakeAPIError(503), FakeAPIError(503)])
+
+        with self.assertRaises(GeminiStopped):
+            self.limiter.call(request, ["a", "b"])
+        with self.assertRaises(GeminiStopped):
+            self.limiter.call(request, ["a", "b"])
+
+        self.assertEqual(calls, ["a", "b", "b"])
+        self.assertEqual(
+            self.limiter.stats.stopped_reason,
+            "all models unavailable (a daily quota exhausted; b HTTP 503 after retries)",
+        )
+
+    def test_requests_are_counted_per_model(self) -> None:
+        request, _ = failing([FakeAPIError(429, quota_id="GenerateRequestsPerDayPerProject")])
+
+        self.limiter.call(request, ["a", "b"])
+        self.limiter.call(request, ["a", "b"])
+
+        self.assertEqual(self.limiter.stats.requests, 3)
+        self.assertEqual(dict(self.limiter.stats.model_requests), {"a": 1, "b": 2})
+
+    def test_default_models_and_env_override(self) -> None:
+        with patch.dict("os.environ", {"GEMINI_MODELS": ""}):
+            self.assertEqual(gemini_models(), DEFAULT_MODELS)
+        with patch.dict("os.environ", {"GEMINI_MODELS": " x , y ,"}):
+            self.assertEqual(gemini_models(), ("x", "y"))
+
+
 class RateLimitTests(LimiterTestCase):
     def test_sixth_request_in_a_minute_waits_for_the_window(self) -> None:
         for _ in range(5):
-            self.limiter.call(lambda: "ok")
+            self.call(lambda model: "ok")
         self.assertEqual(self.time.sleeps, [])
 
-        self.limiter.call(lambda: "ok")
+        self.call(lambda model: "ok")
 
         self.assertEqual(self.time.sleeps, [60.0])
         self.assertEqual(self.limiter.stats.requests, 6)
 
     def test_window_slides(self) -> None:
         for _ in range(5):
-            self.limiter.call(lambda: "ok")
+            self.call(lambda model: "ok")
             self.time.now += 10
 
-        self.limiter.call(lambda: "ok")
+        self.call(lambda model: "ok")
 
         self.assertEqual(self.time.sleeps, [10.0])
+
+    def test_each_model_has_its_own_per_minute_window(self) -> None:
+        for _ in range(5):
+            self.limiter.call(lambda model: "ok", ["a"])
+
+        self.limiter.call(lambda model: "ok", ["b"])
+
+        self.assertEqual(self.time.sleeps, [])
 
     def test_all_gemini_callers_share_one_limiter(self) -> None:
         limiter = reset_gemini_limiter(clock=self.time.clock, sleep=self.time.sleep)
@@ -198,6 +278,7 @@ class StatsReportTests(LimiterTestCase):
     def test_report_lists_counts_and_wait_time(self) -> None:
         stats = self.limiter.stats
         stats.requests = 7
+        stats.model_requests.update({"gemini-3.6-flash": 5, "gemini-3.8-flash": 2})
         stats.record_processed("keyword", 40)
         stats.record_processed("news", 17)
         stats.rate_limited = 3
@@ -209,6 +290,7 @@ class StatsReportTests(LimiterTestCase):
         self.assertEqual(report.splitlines(), [
             "Gemini Stats",
             "Requests: 7",
+            "Models: gemini-3.6-flash 5, gemini-3.8-flash 2",
             "Processed: 57 (keyword 40, news 17)",
             "Skipped: 666 (keywords 600, news 66)",
             "429 Count: 3",
@@ -370,7 +452,7 @@ class ResumeProcessingTests(TestCase):
 
 
 class DailyEtlBatchSizeTests(TestCase):
-    def test_daily_etl_sends_50_items_per_gemini_request(self) -> None:
+    def test_daily_etl_sends_150_items_per_gemini_request(self) -> None:
         from trends import etl
 
         temporary_directory = TemporaryDirectory()
@@ -379,12 +461,19 @@ class DailyEtlBatchSizeTests(TestCase):
         self.addCleanup(engine.dispose)
         history = SimpleNamespace(rows=0, rate_limited=False, summary=lambda: "Completed")
 
-        with patch.object(etl, "sync_theme_mapping", return_value=0),              patch.object(etl, "run_entity_resolution_etl", return_value=0) as entity,              patch.object(etl, "classify_pending_keywords", return_value=0) as keywords,              patch.object(etl, "auto_classify_unclassified_keywords", return_value=0),              patch.object(etl, "classify_pending_news", return_value=0) as news,              patch("trends.trend_history_collector.run_history_collection", return_value=history),              patch.object(etl, "refresh_theme_daily_stats", return_value=0):
+        with patch.object(etl, "sync_theme_mapping", return_value=0), \
+             patch.object(etl, "run_entity_resolution_etl", return_value=0) as entity, \
+             patch.object(etl, "classify_pending_keywords", return_value=0) as keywords, \
+             patch.object(etl, "auto_classify_unclassified_keywords", return_value=0) as auto, \
+             patch.object(etl, "classify_pending_news", return_value=0) as news, \
+             patch("trends.trend_history_collector.run_history_collection", return_value=history), \
+             patch.object(etl, "refresh_theme_daily_stats", return_value=0):
             etl.run_daily_etl(engine, keyword_limit=400, news_limit=1000)
 
-        self.assertEqual(entity.call_args.kwargs, {"limit": 400, "batch_size": 50})
-        self.assertEqual(keywords.call_args.kwargs["batch_size"], 50)
-        self.assertEqual(news.call_args.kwargs, {"limit": 1000, "batch_size": 50})
+        self.assertEqual(entity.call_args.kwargs, {"limit": 400, "batch_size": 150})
+        self.assertEqual(keywords.call_args.kwargs["batch_size"], 150)
+        self.assertEqual(auto.call_args.kwargs["batch_size"], 150)
+        self.assertEqual(news.call_args.kwargs, {"limit": 1000, "batch_size": 150})
 
 
 class DailyEtlNotBlockedTests(TestCase):

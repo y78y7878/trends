@@ -142,6 +142,7 @@ def auto_classify_unclassified_keywords(
     engine: Engine | None = None,
     limit: int = 100,
     classifier: GeminiKeywordClassifier | None = None,
+    batch_size: int = 20,
 ) -> int:
     db_engine = init_db(engine or get_engine())
     # Resume: a keyword answered once keeps theme 「其他」 and would top this list on every run.
@@ -159,8 +160,9 @@ def auto_classify_unclassified_keywords(
         ai_classifier.task = "auto_quality"
 
     processed = 0
-    for start in range(0, len(keywords), 20):
-        batch = keywords[start:start + 20]
+    size = max(batch_size, 1)
+    for start in range(0, len(keywords), size):
+        batch = keywords[start:start + size]
         try:
             predictions = ai_classifier.classify_batch(batch)
         except Exception as error:  # pragma: no cover - network/API failure path

@@ -22,6 +22,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 from trends.database import DB_PATH
+from trends.rss_collector import DEFAULT_INTERVAL_MINUTES
 from trends.timeutil import TAIPEI, parse_db_datetime, taipei_day_start_utc, utc_to_taipei
 
 
@@ -321,7 +322,7 @@ def _rss_component(now: datetime, latest_fetch: object, lines: list[str], errors
     age_text = "—" if age is None else f"{int(age.total_seconds() // 60)} 分鐘前"
     return Component("RSS", status, _fmt_utc(latest_fetch), [
         f"最新資料：{age_text}",
-        f"近 24 小時執行 {runs} 次（預期約 144 次），失敗項目 {failed_items}，錯誤或警告 {len(recent)} 筆",
+        f"近 24 小時執行 {runs} 次（預期約 {24 * 60 // DEFAULT_INTERVAL_MINUTES} 次），失敗項目 {failed_items}，錯誤或警告 {len(recent)} 筆",
     ])
 
 

@@ -40,8 +40,8 @@ $tasks = @(
     @{
         Name        = 'RSS Collector'
         Script      = 'run.bat'
-        Description = 'Google Trends TW RSS -> google_trends / google_trends_news, every 10 minutes'
-        Trigger     = New-ScheduledTaskTrigger -Once -At $today -RepetitionInterval (New-TimeSpan -Minutes 10)
+        Description = 'Google Trends TW RSS -> google_trends / google_trends_news, every 20 minutes'
+        Trigger     = New-ScheduledTaskTrigger -Once -At $today -RepetitionInterval (New-TimeSpan -Minutes 20)
         Settings    = New-TrendsSettings 5
     },
     @{

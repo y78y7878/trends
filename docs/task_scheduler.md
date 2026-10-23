@@ -8,7 +8,7 @@
 
 | 工作名稱 | 批次檔 | 觸發時間（台北） | 執行時間上限 | 寫入資料表 | Log |
 |---|---|---|---|---|---|
-| `\Trends\RSS Collector` | `run.bat` | 每 10 分鐘 | 5 分鐘 | `google_trends`、`google_trends_news` | `logs\rss_collector.log` |
+| `\Trends\RSS Collector` | `run.bat` | 每 20 分鐘 | 5 分鐘 | `google_trends`、`google_trends_news` | `logs\rss_collector.log` |
 | `\Trends\Stock Collector` | `run_stocks.bat` | 週一至週五 18:30 | 60 分鐘 | `stocks` | `logs\stock_collector.log` |
 | `\Trends\Health Report` | `run_health.bat` | 每天 07:30 | 10 分鐘 | 不寫入資料庫（唯讀），輸出 `logs\health_report.md` | `logs\health.log` |
 | `\Trends\Daily ETL` | `run_etl.bat` | 每天 02:00、08:00、14:00、20:00 | 180 分鐘 | `entity_master`、`keyword_classification`、`theme_mapping`、`google_trends_history`、`google_trends_news`（情緒欄位）、`news_theme_classification`、`theme_daily_stats` | `logs\etl.log` |
@@ -25,9 +25,9 @@
 
 ## 時間安排的理由
 
-- **RSS 每 10 分鐘**：Google Trends 台灣 RSS 每次只回傳約 10 筆熱搜，間隔過長會漏掉短暫出現的關鍵字。收集器以唯一索引去重，重複抓取不會產生重複資料。
+- **RSS 每 20 分鐘**：Google Trends 台灣 RSS 只保留最新約 10 筆熱搜，依 2026-10-16～10-23 的資料，每筆在 feed 中停留約 60 分鐘（中位數），每天約 210 筆新熱搜。估計每 10 分鐘漏抓約 0.1%、20 分鐘約 1%、30 分鐘約 3%、60 分鐘約 17%，因此採 20 分鐘。事件日期使用 RSS 的 `published_at`，不受抓取頻率影響。收集器以唯一索引去重，重複抓取不會產生重複資料。
 - **股價 18:30（交易日）**：台股 13:30 收盤，yfinance 通常在傍晚提供當日日線。每次會重抓每檔最近 14 天，錯過的日子在下次執行時自動補齊；國定假日執行只會得到無新資料的結果。
-- **ETL 每天 4 次（02:00、08:00、14:00、20:00）**：Gemini 503 過載與 Google Trends 429 都和時段有關，多次執行能多次嘗試；續跑記錄和「最久未更新優先」輪替確保每次執行都在推進新的資料，不會重複。每次最多 400 個關鍵字、1,000 篇新聞，約 41 個 Gemini 請求，在每分鐘 5 次下約 8 分鐘。
+- **ETL 每天 4 次（02:00、08:00、14:00、20:00）**：Gemini 503 過載與 Google Trends 429 都和時段有關，多次執行能多次嘗試；續跑記錄和「最久未更新優先」輪替確保每次執行都在推進新的資料，不會重複。每次最多 400 個關鍵字、1,000 篇新聞，每個請求 150 筆，約 14 個 Gemini 請求。
 - **健康報告 07:30**：在前一晚的股價與 ETL 之後、一天開始時產生，只需看這一份報告。
 
 ## 註冊方式

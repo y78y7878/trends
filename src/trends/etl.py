@@ -249,10 +249,10 @@ def run_full_update(engine: Engine | None = None) -> dict[str, int]:
     }
 
 
-# Items per Gemini request in the daily ETL. Titles and keywords are short, so 50 fit easily in one
-# prompt and response; larger batches mean 2.5x more items per request under the free tier's
-# per-minute and per-day request quotas.
-GEMINI_BATCH_SIZE = 50
+# Items per Gemini request in the daily ETL. Titles and keywords are short, so 150 still fit easily
+# in one prompt and response (about 10k output tokens of the 64k limit). The free tier allows only
+# about 20 requests per model per day, so items per request is what sets daily throughput.
+GEMINI_BATCH_SIZE = 150
 
 
 def run_daily_etl(
@@ -278,7 +278,7 @@ def run_daily_etl(
     except Exception as error:
         print(f"Keyword classification skipped: {error}")
     try:
-        quality_rows = auto_classify_unclassified_keywords(db_engine, limit=100)
+        quality_rows = auto_classify_unclassified_keywords(db_engine, limit=100, batch_size=GEMINI_BATCH_SIZE)
     except RuntimeError as error:
         print(f"Auto keyword classification skipped: {error}")
     from trends.trend_history_collector import run_history_collection
