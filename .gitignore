@@ -28,3 +28,6 @@ __pycache__/
 
 # Gemini 續跑進度檔寫入時的暫存檔
 *.gemini_progress.json.tmp
+/0
+vscode-extensions.txt
+*.gemini_progress.json
