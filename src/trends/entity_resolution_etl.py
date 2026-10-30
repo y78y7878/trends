@@ -15,6 +15,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.database import (
+    LINK_DIRECT,
     EntityMaster,
     GoogleTrend,
     KeywordClassification,
@@ -23,7 +24,7 @@ from trends.database import (
     init_db,
 )
 from trends.gemini_control import GeminiProgress, gemini_models, should_stop_batches
-from trends.keyword_classification import ALLOWED_THEMES, _generate_json
+from trends.keyword_classification import ALLOWED_THEMES, _generate_json, _reactivating_insert
 from trends.keyword_mapping import load_keyword_mapping
 from trends.theme_study import normalize_theme_name
 
@@ -34,6 +35,9 @@ ENTITY_TYPES = (
     "政府機構", "交通運輸", "公共議題", "新聞媒體", "其他",
 )
 RESOLVED_ENTITY_TYPES = set(ENTITY_TYPES) - {"其他"}
+# Everyday words that are also a company's short name. As a trending search they almost never
+# mean the company, so they are never resolved to its stock (「創意電子」 still is).
+AMBIGUOUS_COMPANY_WORDS = frozenset({"創意", "全新"})
 MIN_CONFIDENCE = 0.6
 BATCH_SIZE = 20
 
@@ -90,6 +94,7 @@ class GeminiEntityClassifier:
 entity_type 只能是：{', '.join(ENTITY_TYPES)}。
 theme_name 只能是：{', '.join(ALLOWED_THEMES)}。
 只有確定是台灣上市櫃公司時才填 stock_id；無法確認時留空，不得臆測。
+一般用語剛好與公司簡稱相同時（例如「創意」「全新」），除非關鍵字明確指公司（例如「創意電子」「全新股價」），不要判斷為上市公司。
 confidence_score 範圍為 0 到 1。無法辨識時 entity_type 填「其他」、confidence_score 填 0。
 每個關鍵字一筆，輸出 JSON：{{"items":[{{"keyword":"","canonical_entity":"","entity_type":"","stock_id":"","industry":"","theme_name":"","confidence_score":0.0}}]}}
 關鍵字：{json.dumps(keywords, ensure_ascii=False)}
@@ -230,7 +235,7 @@ class EntityResolver:
         stock_id = str(prediction.get("stock_id", "")).strip().upper()
         industry = str(prediction.get("industry", "")).strip()
         if entity_type in {"上市公司", "ETF"}:
-            if not re.fullmatch(r"\d{4,6}", stock_id):
+            if not re.fullmatch(r"\d{4,6}[A-Z]?", stock_id):  # ETFs such as 00631L, 00981A
                 return None
             theme_name = "金融類" if entity_type == "ETF" else _theme_for_industry(industry)
         else:
@@ -272,6 +277,7 @@ class EntityResolver:
                     "category": result["theme_name"],
                     "sub_theme": result["industry"] or "公司與股票",
                     "active": 1,
+                    "link_type": LINK_DIRECT,
                 })
             classification_rows.append({
                 "keyword": keyword,
@@ -293,10 +299,7 @@ class EntityResolver:
                 "entity_type", "stock_id", "industry", "theme_name", "confidence_score", "data_source"
             )},
         )
-        theme_statement = (
-            insert(ThemeMapping.__table__).values(theme_rows).on_conflict_do_nothing()
-            if theme_rows else None
-        )
+        theme_statement = _reactivating_insert(theme_rows) if theme_rows else None
         classification_statement = insert(KeywordClassification.__table__).values(classification_rows)
         classification_statement = classification_statement.on_conflict_do_update(
             index_elements=["keyword"],
@@ -396,6 +399,8 @@ class EntityResolver:
             results = []
             for keyword in unresolved:
                 result = self._normalize_prediction(predictions.get(keyword, {}))
+                if result is not None and result["stock_id"] and normalize_entity_keyword(keyword) in AMBIGUOUS_COMPANY_WORDS:
+                    result = None
                 if result is not None:
                     results.append((keyword, result))
             saved += self._save_batch(results)

@@ -13,6 +13,11 @@ DB_PATH = Path(__file__).resolve().parents[2] / "data.db"
 # PRAGMA user_version once the P0 migrations (p0_2_timezone -> 1, p0_1_dedupe_rss -> 2) have run.
 # From this version on, RSS timestamps are canonical naive UTC and the natural keys are unique.
 RSS_SCHEMA_VERSION = 2
+# theme_mapping.link_type: how a keyword reaches a stock. ``direct``: the keyword is the company
+# (or ETF) itself. ``theme``: an industry word linked to its theme's curated basket in
+# theme_mapping.csv. NULL: no stock.
+LINK_DIRECT = "direct"
+LINK_THEME = "theme"
 RSS_UNIQUE_INDEXES = {
     "uq_google_trends_keyword_published": ("google_trends", ("keyword", "published_at")),
     "uq_google_trends_news_trend_url": ("google_trends_news", ("trend_id", "news_url")),
@@ -107,6 +112,7 @@ class ThemeMapping(Base):
     category: Mapped[str | None] = mapped_column(String(100))
     sub_theme: Mapped[str | None] = mapped_column(String(100))
     active: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    link_type: Mapped[str | None] = mapped_column(String(20))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
 
@@ -250,6 +256,7 @@ def init_db(engine: Engine | None = None) -> Engine:
         "theme_mapping": {
             "sub_theme": "VARCHAR(100)",
             "active": "INTEGER NOT NULL DEFAULT 1",
+            "link_type": "VARCHAR(20)",
         },
         "keyword_classification": {
             "need_review": "INTEGER NOT NULL DEFAULT 0",

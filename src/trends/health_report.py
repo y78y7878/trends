@@ -231,12 +231,12 @@ def build_report(db_path: Path = DB_PATH, log_dir: Path = LOG_DIR, now: datetime
         ) or 0
         stock_pairs = q(
             """select count(*) from (select distinct theme_name, keyword from theme_mapping
-               where active = 1 and coalesce(stock_id, '') <> '')"""
+               where active = 1 and link_type = 'direct')"""
         ) or 0
         fresh_stock_pairs = q(
             """select count(*) from (select distinct m.theme_name, m.keyword from theme_mapping m
                join google_trends_history h on h.theme_name = m.theme_name and h.keyword = m.keyword
-               where m.active = 1 and coalesce(m.stock_id, '') <> '' and h.trend_date >= ?)""",
+               where m.active = 1 and m.link_type = 'direct' and h.trend_date >= ?)""",
             (today - timedelta(days=3)).isoformat(),
         ) or 0
         total_keywords = q("select count(distinct keyword) from google_trends where keyword is not null and trim(keyword) <> ''") or 0
@@ -257,7 +257,7 @@ def build_report(db_path: Path = DB_PATH, log_dir: Path = LOG_DIR, now: datetime
         "分類覆蓋率": (total_keywords - unclassified, total_keywords),
         "情緒覆蓋率": (analyzed_news, total_news),
         "熱度覆蓋率（近 3 天有熱度的主題關鍵字）": (fresh_pairs, active_pairs),
-        "熱度覆蓋率（其中有對應股票，事件研究使用）": (fresh_stock_pairs, stock_pairs),
+        "熱度覆蓋率（其中直接對應股票，事件研究使用）": (fresh_stock_pairs, stock_pairs),
     }
     errors: list[str] = []
     components = [

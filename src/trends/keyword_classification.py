@@ -13,6 +13,8 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.database import (
+    LINK_DIRECT,
+    LINK_THEME,
     GoogleTrend,
     GoogleTrendNews,
     KeywordClassification,
@@ -23,7 +25,7 @@ from trends.gemini_control import (
     GeminiProgress, gemini_models, get_gemini_limiter, is_daily_quota_error, should_stop_batches,
 )
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
-from trends.theme_study import THEME_DEFINITIONS, load_theme_mapping, normalize_theme_name
+from trends.theme_study import THEME_DEFINITIONS, load_theme_mapping, normalize_theme_name, theme_basket
 
 
 ALLOWED_THEMES = (*[normalize_theme_name(theme) for theme in THEME_DEFINITIONS], "其他")
@@ -31,6 +33,11 @@ EVENT_TYPES = (
     "營收利多", "新品發表", "法人調升", "法人調降", "政策利多", "政策利空", "市場情緒", "產業趨勢", "其他",
 )
 BATCH_SIZE = 20
+# link_type answers: the keyword is one listed company, an industry word that moves its theme's
+# curated basket, or neither (people, unlisted or foreign companies, events, everything else).
+LINK_COMPANY = "company"
+LINK_INDUSTRY = "industry"
+LINK_NONE = "none"
 
 
 def _daily_quota_exhausted(error: Exception) -> bool:
@@ -78,9 +85,13 @@ class GeminiKeywordClassifier:
 對每個輸入保留原始 keyword，將公司別名或噪音詞正規化為 canonical_keyword。
 例如「全友股價」「2305全友」「妖股全友」都應 canonicalize 為「全友」。
 主題只能是：{', '.join(ALLOWED_THEMES)}。
-sub_theme 使用簡短繁體中文分類；stock_related 只能為 0 或 1；confidence_score 範圍 0 到 1。
-無法判斷時 theme_name 用「其他」、confidence_score 用 0，不要臆測公司代號。
-只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","stock_related":0,"confidence_score":0.0}}]}}。
+sub_theme 使用簡短繁體中文分類；confidence_score 範圍 0 到 1。
+link_type 只能是：
+- company：關鍵字就是一家台灣上市櫃公司或 ETF（例如「元大金控」「台積電」）。
+- industry：產業、產品或政策用語，熱門時可能帶動該主題的同類股票（例如「保險」「伺服器」「升息」）。
+- none：其他一切，包括人名、未在台灣上市的外國公司、品牌、事件、娛樂或無法判斷者（例如「謝金河」「Uber」）。
+無法判斷時 theme_name 用「其他」、link_type 用 none、confidence_score 用 0，不要臆測公司代號。
+只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","link_type":"none","confidence_score":0.0}}]}}。
 輸入：{json.dumps(keywords, ensure_ascii=False)}
 """
         payload = _generate_json(self._client, self._models, prompt, task=self.task, items=len(keywords))
@@ -136,7 +147,7 @@ def _rule_classify(
         row = exact.iloc[0]
         return {
             "canonical_keyword": row["keyword"], "theme_name": row["theme_name"],
-            "sub_theme": row["sub_theme"], "stock_related": int(bool(row["stock_id"])),
+            "sub_theme": row["sub_theme"], "link_type": LINK_INDUSTRY if row["stock_id"] else LINK_NONE,
             "confidence_score": 1.0, "classification_source": "theme_mapping",
         }
 
@@ -153,7 +164,7 @@ def _rule_classify(
             "canonical_keyword": selected_name,
             "theme_name": "科技類" if stock_ids[0] in THEME_DEFINITIONS["科技類"]["stock_ids"] else "其他",
             "sub_theme": "公司與股票",
-            "stock_related": 1,
+            "link_type": LINK_COMPANY,
             "confidence_score": 0.7,
             "classification_source": "mapping_normalizer",
             "stock_ids": stock_ids,
@@ -164,12 +175,12 @@ def _rule_classify(
         row = matches.loc[matches["normalized"].str.len().idxmax()]
         return {
             "canonical_keyword": row["keyword"], "theme_name": row["theme_name"],
-            "sub_theme": row["sub_theme"], "stock_related": 1,
+            "sub_theme": row["sub_theme"], "link_type": LINK_INDUSTRY,
             "confidence_score": 0.5, "classification_source": "mapping_normalizer",
         }
     return {
         "canonical_keyword": keyword.strip(), "theme_name": "其他", "sub_theme": "未分類",
-        "stock_related": 0, "confidence_score": 0.0, "classification_source": "fallback",
+        "link_type": LINK_NONE, "confidence_score": 0.0, "classification_source": "fallback",
     }
 
 
@@ -179,38 +190,49 @@ def _validate_keyword_result(keyword: str, result: dict[str, object]) -> dict[st
         theme_name = "其他"
     canonical = str(result.get("canonical_keyword", keyword)).strip() or keyword.strip()
     confidence = pd.to_numeric(result.get("confidence_score", 0), errors="coerce")
-    stock_related = pd.to_numeric(result.get("stock_related", 0), errors="coerce")
+    stock_ids = [str(stock_id) for stock_id in result.get("stock_ids", [])]
+    link_type = str(result.get("link_type", LINK_NONE)).strip().casefold()
+    if link_type not in (LINK_COMPANY, LINK_INDUSTRY) or theme_name == "其他":
+        link_type = LINK_NONE
+    if stock_ids:
+        link_type = LINK_COMPANY
     return {
         "keyword": keyword,
         "canonical_keyword": canonical[:255],
         "theme_name": theme_name,
         "sub_theme": str(result.get("sub_theme", "未分類")).strip()[:100] or "未分類",
-        "stock_related": int(pd.notna(stock_related) and stock_related != 0),
+        "stock_related": int(link_type != LINK_NONE),
+        "link_type": link_type,
         "confidence_score": float(min(max(confidence if pd.notna(confidence) else 0, 0), 1)),
         "classification_source": str(result.get("classification_source", "gemini"))[:30],
-        "stock_ids": [str(stock_id) for stock_id in result.get("stock_ids", [])],
+        "stock_ids": stock_ids,
     }
 
 
-def _theme_stock_pool(engine: Engine, theme_name: str) -> list[str]:
-    with engine.connect() as connection:
-        rows = connection.execute(
-            select(ThemeMapping.stock_id).where(
-                ThemeMapping.theme_name == theme_name,
-                ThemeMapping.active == 1,
-                ThemeMapping.stock_id.is_not(None),
-            ).distinct()
-        ).scalars().all()
-    return [str(stock_id) for stock_id in rows]
+def _reactivating_insert(rows: list[dict[str, object]]):
+    """Insert theme_mapping links; a link that already exists (e.g. deactivated by p1_link_type
+    as fan-out) is re-enabled with the new link_type instead of being silently skipped."""
+    statement = insert(ThemeMapping.__table__).values(rows)
+    return statement.on_conflict_do_update(
+        index_elements=["theme_name", "keyword", "stock_id", "category"],
+        set_={"active": 1, "link_type": statement.excluded.link_type, "sub_theme": statement.excluded.sub_theme},
+    )
 
 
 def _upsert_theme_rows(engine: Engine, result: dict[str, object]) -> None:
     theme_name = str(result["theme_name"])
     canonical = str(result["canonical_keyword"])
     sub_theme = str(result["sub_theme"])
-    stock_ids = list(dict.fromkeys(result.get("stock_ids", [])))
-    if result["stock_related"] and not stock_ids:
-        stock_ids = _theme_stock_pool(engine, theme_name)
+    # A company links only to its own stock (one Gemini cannot name is left to entity
+    # resolution); an industry word links to the theme's curated basket, never to every stock
+    # that has ever been mapped to the theme.
+    link_type = None
+    stock_ids: list[str | None] = list(dict.fromkeys(result.get("stock_ids", [])))
+    if stock_ids:
+        link_type = LINK_DIRECT
+    elif result["link_type"] == LINK_INDUSTRY:
+        stock_ids = theme_basket(theme_name)
+        link_type = LINK_THEME if stock_ids else None
     if not stock_ids:
         stock_ids = [None]
     rows = [{
@@ -220,8 +242,9 @@ def _upsert_theme_rows(engine: Engine, result: dict[str, object]) -> None:
         "category": theme_name,
         "sub_theme": sub_theme,
         "active": 1,
+        "link_type": link_type if stock_id else None,
     } for stock_id in stock_ids]
-    statement = insert(ThemeMapping.__table__).values(rows).on_conflict_do_nothing()
+    statement = _reactivating_insert(rows)
     with engine.begin() as connection:
         previous = connection.execute(
             select(KeywordClassification.canonical_keyword, KeywordClassification.theme_name)

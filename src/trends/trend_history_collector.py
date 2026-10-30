@@ -12,7 +12,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
-from trends.database import GoogleTrendsHistory, ThemeMapping, get_engine, init_db
+from trends.database import LINK_DIRECT, GoogleTrendsHistory, ThemeMapping, get_engine, init_db
 from trends.keyword_classification import classify_pending_keywords
 from trends.theme_study import sync_theme_mapping
 
@@ -89,7 +89,11 @@ def run_history_collection(
             select(
                 ThemeMapping.theme_name,
                 ThemeMapping.keyword,
-                func.max(case((func.coalesce(ThemeMapping.stock_id, "") != "", 1), else_=0)).label("has_stock"),
+                func.max(case(
+                    (ThemeMapping.link_type == LINK_DIRECT, 2),
+                    (func.coalesce(ThemeMapping.stock_id, "") != "", 1),
+                    else_=0,
+                )).label("stock_rank"),
             )
             .where(ThemeMapping.active == 1)
             .group_by(ThemeMapping.theme_name, ThemeMapping.keyword)
@@ -130,11 +134,12 @@ def run_history_collection(
     if not pending:
         return outcome
     # Rotation: a run usually ends at Google's first 429 after ~25-100 keywords. History is only
-    # the pre-event baseline for stock-mapped keywords (RSS decides event day and size), so those
-    # go first; within each group the stalest (never collected first) go first. Alphabetical
-    # order kept re-querying the same 「其他」 keywords and starved the rest.
+    # the pre-event baseline for stock-mapped keywords (RSS decides event day and size), so
+    # direct company links go first, then theme-basket links, then the rest; within each group
+    # the stalest (never collected first) go first. Alphabetical order kept re-querying the same
+    # 「其他」 keywords and starved the rest.
     pending.sort(key=lambda row: (
-        -int(row.has_stock),
+        -int(row.stock_rank),
         latest_dates.get((row.theme_name, row.keyword), date.min),
         row.theme_name,
         row.keyword,

@@ -283,6 +283,16 @@ class GeminiProgress:
         bucket = self._tasks.setdefault(task, {})
         for item in items:
             bucket[str(item)] = stamp
+        self._save()
+
+    def forget(self, task: str, items: Iterable[object]) -> None:
+        """Let items be sent to Gemini again (e.g. after their classification was reset)."""
+        bucket = self._tasks.setdefault(task, {})
+        for item in items:
+            bucket.pop(str(item), None)
+        self._save()
+
+    def _save(self) -> None:
         if self.path is None:
             return
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")

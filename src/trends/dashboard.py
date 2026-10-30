@@ -12,6 +12,8 @@ from sqlalchemy import String, func, select, type_coerce
 
 import trends.event_study
 from trends.database import (
+    LINK_DIRECT,
+    LINK_THEME,
     GoogleTrend,
     GoogleTrendNews,
     GoogleTrendsHistory,
@@ -53,6 +55,9 @@ RESEARCH_START = pd.Timestamp(trends.event_study.RESEARCH_START_DATE)
 ANALYZED_SENTIMENTS = ("Positive", "Neutral", "Negative")
 UNANALYZED = "Unanalyzed"
 SENTIMENT_LABELS = {UNANALYZED: "未分析"}
+LINK_LABELS = {LINK_DIRECT: "直接（公司本身）", LINK_THEME: "主題（同類股）"}
+# Event-source filter: which theme_mapping.link_type values each choice keeps (empty = all).
+LINK_CHOICES = {"全部": (), LINK_LABELS[LINK_DIRECT]: (LINK_DIRECT,), LINK_LABELS[LINK_THEME]: (LINK_THEME,)}
 SENTIMENT_COVERAGE_MIN_PCT = 20.0
 LOW_SENTIMENT_COVERAGE_MESSAGE = "情緒樣本不足，請謹慎解讀"
 
@@ -591,6 +596,7 @@ def page_event_study() -> None:
         if not stock_ids:
             stock_ids = themes[theme_name]["stock_ids"]
         stock_id = st.selectbox("股票", stock_ids, key="study_stock")
+        link_choice = st.selectbox("事件來源", list(LINK_CHOICES), key="study_link_type")
 
     history = load_theme_history(theme_name, lookback_days=365)
     warmup_start = (RESEARCH_START - pd.Timedelta(days=100)).date()
@@ -624,6 +630,12 @@ def page_event_study() -> None:
         theme_mapping["stock_id"].astype(str).eq(str(stock_id))
         & theme_mapping["active"].astype(str).str.casefold().isin(("1", "true"))
     ]
+    if LINK_CHOICES[link_choice]:
+        selected_mapping = selected_mapping[selected_mapping["link_type"].isin(LINK_CHOICES[link_choice])]
+        if selected_mapping.empty:
+            show_empty(f"這檔股票沒有「{link_choice}」的關鍵字。")
+            return
+    link_labels = selected_mapping.drop_duplicates("keyword").set_index("keyword")["link_type"].map(LINK_LABELS)
     selected_keywords = selected_mapping["keyword"].dropna().astype(str).tolist() or theme_keywords
     history = history[history["keyword"].isin(selected_keywords)].copy()
     history["date"] = pd.to_datetime(history["trend_date"], errors="coerce").dt.normalize()
@@ -638,6 +650,7 @@ def page_event_study() -> None:
     if not triggers.empty:
         triggers["theme"] = theme_name
         triggers["stock_id"] = str(stock_id)
+        triggers["link_type"] = triggers["keyword"].map(link_labels).fillna("—")
         sentiment_counts = news.groupby(["date", "keyword", "news_sentiment"]).size()
         triggers["news_sentiment"] = triggers.apply(
             lambda row: ", ".join(
@@ -827,7 +840,7 @@ def page_event_study() -> None:
     display = performance.rename(columns={
         "event_date": "事件日期", "keyword": "關鍵字", "theme": "主題", "stock_id": "股票",
         "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "rss_traffic": "熱搜流量",
-        "trigger": "觸發原因", "return_1d": "1日報酬",
+        "trigger": "觸發原因", "link_type": "事件來源", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
         "reaction_days": "首次反應天數",
@@ -837,7 +850,7 @@ def page_event_study() -> None:
     for column in display.columns:
         display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
     display = display[[
-        "事件日期", "關鍵字", "主題", "股票", "觸發原因", "熱搜流量", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
+        "事件日期", "關鍵字", "主題", "股票", "事件來源", "觸發原因", "熱搜流量", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
         "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
     ]]
     st.dataframe(display, hide_index=True)

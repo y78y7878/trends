@@ -175,6 +175,14 @@ Streamlit Dashboard（app.py）── 唯讀查詢 data.db（快取 5 分鐘）
 
 主題、關鍵字與股票對應維護於 `theme_mapping.csv`；股票與公司別名維護於 `keyword_theme_mapping.csv` 及 `entity_seed_mapping.csv`。
 
+`theme_mapping.link_type` 區分關鍵字與股票的兩種連結（2026-10-30 起，`trends.migrations.p1_link_type`）：
+
+- `direct`：關鍵字就是該公司或 ETF（實體辨識或公司別名），只連到它自己的股票。
+- `theme`：產業詞（例如「保險」「伺服器」），連到 `theme_mapping.csv` 中該主題人工設定的股票籃子，用來研究「熱門詞是否帶動同類股」。
+- 人名、未在台灣上市的外國公司、事件等不連股票。一般用語剛好是公司簡稱的（`AMBIGUOUS_COMPANY_WORDS`，例如「創意」「全新」）也不連。
+
+事件研究頁的「事件來源」可只看直接或主題事件；歷史熱度收集依序優先 `direct`、`theme`。
+
 ## 專案能力展示
 
 - **資料工程**：多來源 ETL、自動化資料收集、SQLite 資料模型。

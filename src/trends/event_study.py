@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
+from trends.alpha_signal import parse_traffic
 from trends.database import EventAnalysis, GoogleTrend, GoogleTrendNews, Stock, init_db
 from trends.features import RETURN_DAYS, add_price_features
 from trends.keyword_mapping import DEFAULT_MAPPING_PATH, load_keyword_mapping, match_keyword
@@ -490,12 +491,6 @@ def build_event_research_text(event: pd.Series | dict[str, object], performance:
     )
 
 
-def parse_approx_traffic(value: object) -> float:
-    """RSS approx_traffic such as ``2000+`` or ``2,000+`` -> 2000.0; NaN when unparseable."""
-    digits = "".join(character for character in str(value) if character.isdigit())
-    return float(digits) if digits else float("nan")
-
-
 def detect_research_events(
     daily_heat: pd.DataFrame,
     daily_news: pd.DataFrame,
@@ -532,7 +527,7 @@ def detect_research_events(
         rss = pd.DataFrame(columns=["date", "keyword", "rss_traffic"])
     else:
         rss["date"] = pd.to_datetime(rss["date"], errors="coerce").dt.normalize()
-        rss["rss_traffic"] = rss["approx_traffic"].map(parse_approx_traffic)
+        rss["rss_traffic"] = rss["approx_traffic"].map(parse_traffic)
         rss = rss.dropna(subset=["date", "keyword"])
         rss = rss.groupby(["date", "keyword"], as_index=False)["rss_traffic"].max()
 

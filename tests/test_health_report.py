@@ -151,7 +151,7 @@ class HealthReportTests(TestCase):
             ))
         self.insert(KeywordClassification, keyword="A", canonical_keyword="A", theme_name="科技類", sub_theme="半導體",
                     stock_related=1, confidence_score=0.9, classification_source="gemini", created_at=fetched)
-        self.insert(ThemeMapping, theme_name="科技類", keyword="A", stock_id="2330", category="company", active=1)
+        self.insert(ThemeMapping, theme_name="科技類", keyword="A", stock_id="2330", category="company", active=1, link_type="direct")
         self.insert(GoogleTrendsHistory, keyword="A", theme_name="科技類", trend_date=date(2026, 10, 14), trend_score=50)
         self.insert(Stock, date=date(2026, 10, 14), stock_id="2330", open=1, high=1, low=1, close=1, adj_close=1, volume=1)
         self.insert(ThemeDailyStats, stat_date=date(2026, 10, 14), theme_name="科技類", keyword_count=1, news_count=1,
@@ -180,17 +180,18 @@ class HealthReportTests(TestCase):
         self.assertEqual(report.coverage["分類覆蓋率"], (1, 1))
         self.assertEqual(report.coverage["情緒覆蓋率"], (1, 1))
         self.assertEqual(report.coverage["熱度覆蓋率（近 3 天有熱度的主題關鍵字）"], (1, 1))
-        self.assertEqual(report.coverage["熱度覆蓋率（其中有對應股票，事件研究使用）"], (1, 1))
+        self.assertEqual(report.coverage["熱度覆蓋率（其中直接對應股票，事件研究使用）"], (1, 1))
 
-    def test_stock_heat_coverage_excludes_keywords_without_stocks(self) -> None:
+    def test_stock_heat_coverage_counts_only_direct_links(self) -> None:
         self.insert(ThemeMapping, theme_name="其他", keyword="路人", stock_id=None, category="其他", active=1)
         self.insert(GoogleTrendsHistory, keyword="路人", theme_name="其他", trend_date=date(2026, 10, 14), trend_score=9)
-        self.insert(ThemeMapping, theme_name="金融類", keyword="玉山金", stock_id="2884", category="company", active=1)
+        self.insert(ThemeMapping, theme_name="金融類", keyword="玉山金", stock_id="2884", category="company", active=1, link_type="direct")
+        self.insert(ThemeMapping, theme_name="金融類", keyword="保險", stock_id="2882", category="金融類", active=1, link_type="theme")
 
         report = self.report()
 
-        self.assertEqual(report.coverage["熱度覆蓋率（近 3 天有熱度的主題關鍵字）"], (2, 3))
-        self.assertEqual(report.coverage["熱度覆蓋率（其中有對應股票，事件研究使用）"], (1, 2))
+        self.assertEqual(report.coverage["熱度覆蓋率（近 3 天有熱度的主題關鍵字）"], (2, 4))
+        self.assertEqual(report.coverage["熱度覆蓋率（其中直接對應股票，事件研究使用）"], (1, 2))
         self.assertEqual(component(report, "Stocks").last_success, "2026-10-14 18:30")
 
     def test_gemini_processing_is_summed_for_today(self) -> None:
@@ -231,7 +232,7 @@ class HealthReportTests(TestCase):
         self.assertEqual(component(self.report(), "Google Trends").status, WARN)
 
         for index in range(9):
-            self.insert(ThemeMapping, theme_name="科技類", keyword=f"stale{index}", stock_id="2330", category="company", active=1)
+            self.insert(ThemeMapping, theme_name="科技類", keyword=f"stale{index}", stock_id="2330", category="company", active=1, link_type="direct")
         self.assertEqual(component(self.report(), "Google Trends").status, FAIL)
 
     def test_gemini_stopped_without_progress_fails(self) -> None:
