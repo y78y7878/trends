@@ -132,17 +132,18 @@ class RunHistoryCollectionTests(TestCase):
         self.assertEqual(client.requested, ["A", "A"])
         self.assertEqual((outcome.success, outcome.failed), (1, 0))
 
-    def test_rotation_queries_stalest_then_stock_mapped_keywords_first(self) -> None:
+    def test_rotation_queries_stock_mapped_then_stalest_keywords_first(self) -> None:
         self.add_keywords("其他甲", "其他乙", theme="其他", stock_id=None)
         self.add_keywords("舊股", "新股")
         stale = date.today() - timedelta(days=5)
         save_history(self.engine, "科技類", "舊股", pd.DataFrame({"trend_date": [stale], "trend_score": [10]}))
+        save_history(self.engine, "其他", "其他甲", pd.DataFrame({"trend_date": [stale], "trend_score": [10]}))
         client = FakeTrendClient()
 
         self.run_collection(client)
 
-        # Never-collected first (stock-mapped before 「其他」), then the stale one.
-        self.assertEqual(client.requested, ["新股", "其他乙", "其他甲", "舊股"])
+        # Stock-mapped first (never collected before stale), then the rest the same way.
+        self.assertEqual(client.requested, ["新股", "舊股", "其他乙", "其他甲"])
 
     def test_rate_limited_runs_rotate_instead_of_repeating_the_same_keywords(self) -> None:
         self.add_keywords("A", "B", "C", "D")

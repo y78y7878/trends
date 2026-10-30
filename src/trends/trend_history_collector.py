@@ -129,12 +129,13 @@ def run_history_collection(
             pending.append(row)
     if not pending:
         return outcome
-    # Rotation: a run usually ends at Google's first 429 after ~25-100 keywords, so query the
-    # stalest (never collected first) and, among equally stale ones, keywords mapped to a stock.
-    # Alphabetical order kept re-querying the same 「其他」 keywords and starved the rest.
+    # Rotation: a run usually ends at Google's first 429 after ~25-100 keywords. History is only
+    # the pre-event baseline for stock-mapped keywords (RSS decides event day and size), so those
+    # go first; within each group the stalest (never collected first) go first. Alphabetical
+    # order kept re-querying the same 「其他」 keywords and starved the rest.
     pending.sort(key=lambda row: (
-        latest_dates.get((row.theme_name, row.keyword), date.min),
         -int(row.has_stock),
+        latest_dates.get((row.theme_name, row.keyword), date.min),
         row.theme_name,
         row.keyword,
     ))

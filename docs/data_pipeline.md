@@ -47,7 +47,7 @@ Daily ETL（`python -m trends.etl`，[etl.py](../src/trends/etl.py) 的 `run_dai
 
 | 工作 | 模組 | 外部依賴 | 寫入 |
 |---|---|---|---|
-| RSS Collector | `trends.rss_collector --once` | Google Trends RSS（`trends.google.com/trending/rss?geo=TW`） | `google_trends`、`google_trends_news` |
+| RSS Collector | `trends.rss_collector --once` | Google Trends RSS（`trends.google.com/trending/rss?geo=TW`） | `google_trends`、`google_trends_news`、`google_trends_observations`（每次執行看到的流量，2026-10-30 起） |
 | Stock Collector | `trends.stock_collector` | yfinance（Yahoo Finance） | `stocks` |
 
 Dashboard 各頁使用的資料：
@@ -65,7 +65,7 @@ Dashboard 各頁使用的資料：
 |---|---|---|---|---|
 | Google Trends RSS | HTTP GET，公開 RSS | 每 20 分鐘 | 當下約 10 筆熱搜和附帶的新聞 | 免費，至今未觀察到限流 |
 | yfinance | 非官方 Yahoo Finance API | 交易日 18:30 | 每檔重抓最近 14 天（新股票回補 5 年） | 免費，非官方，介面可能變動 |
-| Google Trends（pytrends） | 非官方，套件已停止維護 | 每天 4 次 | 啟用中的主題關鍵字，每個抓近 90 天；已更新到昨天的跳過；最久未更新的優先，同樣久時有對應股票的優先 | 免費，**容易被 429 限流**，Google 不公開配額 |
+| Google Trends（pytrends） | 非官方，套件已停止維護 | 每天 4 次 | 啟用中的主題關鍵字，每個抓近 90 天；已更新到昨天的跳過；**有對應股票的優先**（只當事件前的基準線用），同組內最久未更新的優先 | 免費，**容易被 429 限流**，Google 不公開配額 |
 | Gemini API | `google-genai`，金鑰放在 `.env` | 每天 4 次 | 每次最多 400 個關鍵字、1,000 篇新聞，每個請求 150 筆 | 免費方案每個模型每天約 20 個請求；主模型用完改用備用模型，全部用完才停止並留待下次 |
 | `theme_mapping.csv`、`entity_seed_mapping.csv` | 本機 CSV，人工維護 | 每次 ETL 或 Dashboard 啟動時同步 | 全部 | — |
 
@@ -75,7 +75,7 @@ Dashboard 各頁使用的資料：
 |---|---|---|---|---|
 | **RSS** | `google_trends`、`google_trends_news` | 新關鍵字無法分類；新聞型事件與新聞情緒停止；側邊欄顯示「超過 24 小時未更新」 | ❌ RSS 只提供當下熱搜，**中斷期間的資料永久遺失** | `rss_collector.log` 出現 `failed>0` 或 exit 1/2；工作結果非 0 |
 | **yfinance** | `stocks` | 事件後報酬、MA20/MA60、市場雷達近 10 日表現顯示「資料不足」 | ✅ 缺口在 14 天內，下次執行自動補齊 | `stock_collector.log`；側邊欄在股價超過 3 天未更新時顯示「部分資料待更新」 |
-| **Google Trends（pytrends）** | `google_trends_history` | 約 90% 的事件來自「搜尋熱度上升」，這類事件停止產生；市場雷達熱度變化停止 | ✅ 缺口在 90 天內，限流解除後自動回補 | `etl.log` 出現 `rate limited; stopping run`；`Daily ETL` 工作結果為 `3` |
+| **Google Trends（pytrends）** | `google_trends_history` | 「搜尋熱度上升」事件停止產生；市場雷達熱度變化停止。2026-10-30 起「登上熱搜」事件由 RSS 判斷，不受影響 | ✅ 缺口在 90 天內，限流解除後自動回補 | `etl.log` 出現 `rate limited; stopping run`；`Daily ETL` 工作結果為 `3` |
 | **Gemini** | `keyword_classification`（AI 部分）、新聞情緒 | 新關鍵字改用 fallback 規則或歸入「其他」；情緒覆蓋率停滯，Dashboard 顯示「情緒樣本不足」 | ✅ 從中斷處繼續，已完成的資料不會重送（見下方「Gemini 限流與續跑」） | `etl.log` 的 `Gemini Stats`，以及 `[GEMINI] stopped for this run: …` |
 | **Daily ETL 沒有執行** | 上述 Gemini、Google Trends 的所有項目，以及 `theme_daily_stats` | 同上 | ✅ 同上 | `Daily ETL` 的 `LastRunTime` 沒有更新 |
 | **電腦關機或睡眠** | 全部 | 同上 | 工作設定了錯過後補跑；RSS 的中斷期間無法補 | 工作排程器的 `LastRunTime` |

@@ -50,6 +50,33 @@ class ResearchEventTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events.iloc[0]["trigger"], "搜尋熱度上升")
 
+    def test_first_rss_day_after_quiet_period_creates_sized_event(self) -> None:
+        rss = pd.DataFrame({
+            "date": pd.to_datetime(["2026-09-01", "2026-09-01", "2026-09-02", "2026-09-10"]),
+            "keyword": "AI",
+            "approx_traffic": ["200+", "2,000+", "500+", "1000+"],
+        })
+
+        events = detect_research_events(pd.DataFrame(), pd.DataFrame(), daily_rss=rss)
+
+        # 09-02 follows a day on the list, so only 09-01 and 09-10 start an event.
+        self.assertEqual(
+            events["event_date"].dt.strftime("%Y-%m-%d").tolist(), ["2026-09-10", "2026-09-01"]
+        )
+        self.assertEqual(events["rss_traffic"].tolist(), [1000.0, 2000.0])
+        self.assertTrue(events["trigger"].eq("登上熱搜").all())
+
+    def test_rss_trigger_combines_with_news_trigger(self) -> None:
+        dates = pd.date_range("2026-09-01", periods=8, freq="D")
+        heat = pd.DataFrame({"date": dates, "keyword": "AI", "heat": 0})
+        news = pd.DataFrame({"date": [dates[-1]] * 3, "keyword": "AI", "news_id": [1, 2, 3]})
+        rss = pd.DataFrame({"date": [dates[-1]], "keyword": "AI", "approx_traffic": ["5000+"]})
+
+        events = detect_research_events(heat, news, daily_rss=rss)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events.iloc[0]["trigger"], "登上熱搜、新聞量增加")
+
     def test_event_returns_use_trading_days_and_ten_day_extremes(self) -> None:
         dates = pd.bdate_range("2026-09-01", periods=12)
         prices = pd.DataFrame({

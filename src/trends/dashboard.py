@@ -233,6 +233,8 @@ def format_event_table_value(value: object, column_name: str | None = None) -> s
             return f"{float(value):.2%}"
         if column_name == "事件熱度":
             return f"{float(value):.0f}"
+        if column_name == "熱搜流量":
+            return f"{int(value):,}+"
         if column_name in {"MA20突破日", "MA60突破日"}:
             return normalize_breakout_day(value)
         return str(value)
@@ -295,6 +297,16 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
     news["news_sentiment"] = normalize_sentiment(news["news_sentiment"])
     news["sentiment_score"] = pd.to_numeric(news.get("sentiment_score", pd.Series([None] * len(news))), errors="coerce")
     return news.dropna(subset=["date"])[columns]
+
+
+def prepare_theme_rss(observations: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
+    """One row per RSS trend of these keywords: its Asia/Taipei day and approx_traffic."""
+    columns = ["date", "keyword", "approx_traffic"]
+    if observations.empty or not keywords:
+        return pd.DataFrame(columns=columns)
+    trends = observations[observations["keyword"].isin(keywords)].drop_duplicates("trend_id").copy()
+    trends["date"] = utc_series_to_taipei_date(trends["published_at"].fillna(trends["fetched_at"]))
+    return trends.dropna(subset=["date"])[columns]
 
 
 def render_overview_cards(cards: list[tuple[str, str]]) -> None:
@@ -509,7 +521,9 @@ def build_market_radar() -> pd.DataFrame:
         daily_heat = history.rename(columns={"trend_date": "date", "trend_score": "heat"})
         daily_heat = daily_heat[daily_heat["keyword"].isin(keywords)][["date", "keyword", "heat"]] if not history.empty else pd.DataFrame()
         news_for_events = news[["date", "keyword", "news_id"]] if not news.empty else pd.DataFrame()
-        triggers = detect_research_events(daily_heat, news_for_events)
+        triggers = detect_research_events(
+            daily_heat, news_for_events, daily_rss=prepare_theme_rss(observations, keywords)
+        )
         mapping = mappings[
             mappings["theme_name"].eq(theme_name)
             & mappings["active"].astype(str).str.casefold().isin(("1", "true"))
@@ -617,7 +631,9 @@ def page_event_study() -> None:
     observations = load_trend_observations()
     news = prepare_theme_news(observations, selected_keywords)
     news_for_events = news[["date", "keyword", "news_id"]] if not news.empty else news
-    triggers = detect_research_events(daily_heat, news_for_events)
+    triggers = detect_research_events(
+        daily_heat, news_for_events, daily_rss=prepare_theme_rss(observations, selected_keywords)
+    )
     triggers = triggers[triggers["event_date"].between(start_date, end_date)]
     if not triggers.empty:
         triggers["theme"] = theme_name
@@ -810,7 +826,8 @@ def page_event_study() -> None:
     st.subheader("事件績效")
     display = performance.rename(columns={
         "event_date": "事件日期", "keyword": "關鍵字", "theme": "主題", "stock_id": "股票",
-        "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "return_1d": "1日報酬",
+        "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "rss_traffic": "熱搜流量",
+        "trigger": "觸發原因", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
         "reaction_days": "首次反應天數",
@@ -820,7 +837,7 @@ def page_event_study() -> None:
     for column in display.columns:
         display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
     display = display[[
-        "事件日期", "關鍵字", "主題", "股票", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
+        "事件日期", "關鍵字", "主題", "股票", "觸發原因", "熱搜流量", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
         "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
     ]]
     st.dataframe(display, hide_index=True)

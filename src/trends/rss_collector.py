@@ -5,6 +5,8 @@
   fetched_at keeps the first observation. ``RETURNING trend_id`` links news to the existing row.
 - ``google_trends_news``: insert-or-ignore on (trend_id, news_url), so analysed sentiment is never
   overwritten.
+- ``google_trends_observations``: one row per run per trend with that run's approx_traffic, so time
+  on the list and traffic growth survive the google_trends upsert.
 - Refuses to run until the database is migrated (user_version >= 2 and unique indexes present).
 
 Usage::
@@ -51,6 +53,11 @@ INSERT_NEWS = text(
     "INSERT INTO google_trends_news (trend_id, news_title, news_url, news_source, fetched_at) "
     "VALUES (:trend_id, :news_title, :news_url, :news_source, :fetched_at) "
     "ON CONFLICT (trend_id, news_url) DO NOTHING"
+)
+INSERT_OBSERVATION = text(
+    "INSERT INTO google_trends_observations (trend_id, observed_at, approx_traffic) "
+    "VALUES (:trend_id, :observed_at, :approx_traffic) "
+    "ON CONFLICT (trend_id, observed_at) DO NOTHING"
 )
 
 
@@ -146,6 +153,9 @@ def store_items(engine: Engine, items: list[TrendItem], fetched_at: str | None =
                 trend_id = connection.execute(UPSERT_TREND, {
                     **key, "approx_traffic": item.approx_traffic, "fetched_at": observed_at,
                 }).scalar_one()
+                connection.execute(INSERT_OBSERVATION, {
+                    "trend_id": trend_id, "observed_at": observed_at, "approx_traffic": item.approx_traffic,
+                })
                 for news in item.news:
                     result.new_news += connection.execute(INSERT_NEWS, {
                         "trend_id": trend_id,

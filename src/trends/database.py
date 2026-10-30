@@ -34,6 +34,19 @@ class GoogleTrend(Base):
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class GoogleTrendObservation(Base):
+    """One row per RSS run that saw a trend, so its time on the list and traffic growth are kept
+    (google_trends only holds the latest approx_traffic)."""
+
+    __tablename__ = "google_trends_observations"
+    __table_args__ = (UniqueConstraint("trend_id", "observed_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trend_id: Mapped[int] = mapped_column(Integer, ForeignKey("google_trends.trend_id"), nullable=False, index=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    approx_traffic: Mapped[str | None] = mapped_column(String(50))
+
+
 class GoogleTrendNews(Base):
     __tablename__ = "google_trends_news"
     __table_args__ = (Index("uq_google_trends_news_trend_url", "trend_id", "news_url", unique=True),)

@@ -490,16 +490,28 @@ def build_event_research_text(event: pd.Series | dict[str, object], performance:
     )
 
 
+def parse_approx_traffic(value: object) -> float:
+    """RSS approx_traffic such as ``2000+`` or ``2,000+`` -> 2000.0; NaN when unparseable."""
+    digits = "".join(character for character in str(value) if character.isdigit())
+    return float(digits) if digits else float("nan")
+
+
 def detect_research_events(
     daily_heat: pd.DataFrame,
     daily_news: pd.DataFrame,
     heat_growth_threshold: float = 0.5,
     news_multiple_threshold: float = 2.0,
     minimum_news_count: int = 3,
+    daily_rss: pd.DataFrame | None = None,
+    rss_quiet_days: int = 3,
 ) -> pd.DataFrame:
-    columns = ["event_date", "keyword", "event_heat", "news_count", "heat_change", "trigger"]
+    """Event days per keyword. ``daily_rss`` (date, keyword, approx_traffic) adds a 「登上熱搜」
+    trigger on the first RSS day after ``rss_quiet_days`` days off the list; its traffic is the
+    event size and needs no Google Trends history, which is often rate limited."""
+    columns = ["event_date", "keyword", "event_heat", "news_count", "heat_change", "rss_traffic", "trigger"]
     heat = daily_heat.copy()
     news = daily_news.copy()
+    rss = daily_rss.copy() if daily_rss is not None else pd.DataFrame()
     if heat.empty:
         heat = pd.DataFrame(columns=["date", "keyword", "heat"])
     if news.empty:
@@ -516,15 +528,26 @@ def detect_research_events(
             news = news.drop_duplicates("news_id")
         news = news.groupby(["date", "keyword"], as_index=False).size().rename(columns={"size": "news_count"})
 
-    if heat.empty and news.empty:
+    if rss.empty:
+        rss = pd.DataFrame(columns=["date", "keyword", "rss_traffic"])
+    else:
+        rss["date"] = pd.to_datetime(rss["date"], errors="coerce").dt.normalize()
+        rss["rss_traffic"] = rss["approx_traffic"].map(parse_approx_traffic)
+        rss = rss.dropna(subset=["date", "keyword"])
+        rss = rss.groupby(["date", "keyword"], as_index=False)["rss_traffic"].max()
+
+    if heat.empty and news.empty and rss.empty:
         return pd.DataFrame(columns=columns)
 
-    keywords = sorted(set(heat.get("keyword", [])) | set(news.get("keyword", [])))
+    keywords = sorted(
+        set(heat.get("keyword", [])) | set(news.get("keyword", [])) | set(rss.get("keyword", []))
+    )
     output: list[dict] = []
     for keyword in keywords:
         keyword_heat = heat.loc[heat["keyword"].eq(keyword)].set_index("date")["heat"]
         keyword_news = news.loc[news["keyword"].eq(keyword)].set_index("date")["news_count"]
-        observed_dates = keyword_heat.index.union(keyword_news.index)
+        keyword_rss = rss.loc[rss["keyword"].eq(keyword)].set_index("date")["rss_traffic"]
+        observed_dates = keyword_heat.index.union(keyword_news.index).union(keyword_rss.index)
         dates = pd.date_range(observed_dates.min(), observed_dates.max(), freq="D")
         heat_series = keyword_heat.reindex(dates)
         news_series = keyword_news.reindex(dates, fill_value=0)
@@ -538,8 +561,15 @@ def detect_research_events(
             & prior_news.notna()
         )
 
-        for event_date in dates[heat_trigger | news_trigger]:
+        rss_series = keyword_rss.reindex(dates)
+        on_list = rss_series.notna()
+        recently_on_list = on_list.astype(int).rolling(rss_quiet_days, min_periods=1).max().shift(1).fillna(0).astype(bool)
+        rss_trigger = on_list & ~recently_on_list
+
+        for event_date in dates[heat_trigger | news_trigger | rss_trigger]:
             reasons = []
+            if rss_trigger.loc[event_date]:
+                reasons.append("登上熱搜")
             if heat_trigger.loc[event_date]:
                 reasons.append("搜尋熱度上升")
             if news_trigger.loc[event_date]:
@@ -550,6 +580,7 @@ def detect_research_events(
                 "event_heat": heat_series.loc[event_date],
                 "news_count": int(news_series.loc[event_date]),
                 "heat_change": heat_change.loc[event_date],
+                "rss_traffic": rss_series.loc[event_date],
                 "trigger": "、".join(reasons),
             })
 
