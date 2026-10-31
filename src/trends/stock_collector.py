@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from datetime import date, timedelta
 
 import pandas as pd
@@ -10,20 +11,31 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
-from trends.database import Stock, get_engine, init_db
+from trends.database import Stock, ThemeMapping, get_engine, init_db
 from trends.keyword_mapping import get_stock_pool
 from trends.theme_study import load_theme_mapping
 
 
 DEFAULT_STOCKS = sorted(set(get_stock_pool()) | set(load_theme_mapping()["stock_id"]))
+# Taiwan codes: 4-6 digits, ETFs may end in one letter (00631L, 00953B). Listed on TWSE (.TW) or,
+# when that returns nothing, TPEx (.TWO).
+TAIWAN_CODE = re.compile(r"\d{4,6}[A-Z]?")
+
+
+def stock_pool(engine: Engine) -> list[str]:
+    """CSV stocks plus every stock an active theme_mapping link points to, so companies found by
+    entity resolution get prices too (the CSVs alone missed them)."""
+    with engine.connect() as connection:
+        linked = connection.execute(
+            select(ThemeMapping.stock_id).where(ThemeMapping.active == 1, ThemeMapping.stock_id.is_not(None)).distinct()
+        ).scalars().all()
+    return sorted({stock_id for stock_id in DEFAULT_STOCKS if stock_id} | {str(stock_id).strip().upper() for stock_id in linked if str(stock_id).strip()})
 
 
 def to_yfinance_ticker(stock_id: str) -> str:
     stock_id = stock_id.strip().upper()
-    if stock_id.isdigit():
+    if TAIWAN_CODE.fullmatch(stock_id):
         return f"{stock_id}.TW"
-    if stock_id.endswith((".TW", ".TWO")):
-        return stock_id
     return stock_id
 
 
@@ -37,7 +49,7 @@ def download_prices(stock_id: str, start: date | None = None) -> pd.DataFrame:
         options["end"] = (date.today() + timedelta(days=1)).isoformat()
 
     history = yf.Ticker(ticker).history(**options)
-    if history.empty and stock_id.strip().isdigit():
+    if history.empty and TAIWAN_CODE.fullmatch(stock_id.strip().upper()):
         history = yf.Ticker(f"{stock_id.strip()}.TWO").history(**options)
     if history.empty:
         return pd.DataFrame(columns=["date", "stock_id", "open", "high", "low", "close", "adj_close", "volume"])
@@ -75,7 +87,7 @@ def save_prices(engine: Engine, prices: pd.DataFrame) -> int:
 def fetch_and_store(stock_ids: list[str] | None = None, engine: Engine | None = None) -> int:
     db_engine = init_db(engine or get_engine())
     updated = 0
-    for stock_id in stock_ids or DEFAULT_STOCKS:
+    for stock_id in stock_ids or stock_pool(db_engine):
         with db_engine.connect() as connection:
             latest_date = connection.execute(
                 select(func.max(Stock.date)).where(Stock.stock_id == stock_id.upper())

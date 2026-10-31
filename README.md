@@ -326,7 +326,7 @@ streamlit run app.py
 python -m trends.stock_collector
 ```
 
-預設股票池由 `keyword_theme_mapping.csv` 去重產生，涵蓋約 48 檔台股 ETF、產業代表股及美股；台股代號會轉為 yfinance 的 `.TW` 格式。映射欄位為 `keyword,type,stock_id`，其中 `type` 為 `company`、`industry` 或 `theme`，同一 keyword 可有多筆股票。
+股票池為 `keyword_theme_mapping.csv`、`theme_mapping.csv` 與 `theme_mapping` 資料表中所有有效連結的股票（2026-11-01 起，約 215 檔），所以實體辨識新找到的公司也會有股價。台股代號（含 `00631L` 這類字尾帶字母的 ETF）先用 yfinance 的 `.TW`（上市），沒有資料時改用 `.TWO`（上櫃）；log 中 `.TW` 的「possibly delisted」訊息是這個嘗試留下的，不代表抓取失敗。映射欄位為 `keyword,type,stock_id`，其中 `type` 為 `company`、`industry` 或 `theme`，同一 keyword 可有多筆股票。
 
 若需重新建立／檢查 schema，使用 `schema.sql`；程式的 `init_db()` 會自動建立資料表並遷移舊新聞表。資料欄位及索引定義以 [schema.sql](schema.sql) 為準。
 

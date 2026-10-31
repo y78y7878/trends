@@ -259,3 +259,26 @@ class KeywordLinkTests(TestCase):
         with self.engine.connect() as connection:
             row = connection.execute(select(ThemeMapping.active, ThemeMapping.link_type)).one()
         self.assertEqual(tuple(row), (1, "direct"))
+
+    def test_company_outside_every_theme_still_links_to_its_stock(self) -> None:
+        self.add_keywords(["華航"])
+        gemini = FakeEntityClassifier({
+            "華航": {"keyword": "華航", "canonical_entity": "中華航空", "entity_type": "上市公司",
+                     "stock_id": "2610", "industry": "航空運輸", "confidence_score": 0.95},
+        })
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            row = connection.execute(select(
+                ThemeMapping.theme_name, ThemeMapping.keyword, ThemeMapping.stock_id, ThemeMapping.link_type,
+            ).where(ThemeMapping.stock_id.is_not(None))).one()
+        self.assertEqual(tuple(row), ("其他", "中華航空", "2610", "direct"))
+
+    def test_more_industries_map_to_existing_themes(self) -> None:
+        from trends.entity_resolution_etl import _theme_for_industry
+
+        for industry, theme in {"光電業": "科技類", "通信網路業": "科技類", "化學工業": "能源與原物料類",
+                                "水泥工業": "能源與原物料類", "重電工程": "綠能環保類", "航空運輸": "其他"}.items():
+            with self.subTest(industry=industry):
+                self.assertEqual(_theme_for_industry(industry), theme)

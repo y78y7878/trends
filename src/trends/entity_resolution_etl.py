@@ -60,12 +60,18 @@ def _theme_for_industry(industry: str) -> str:
     rules = (
         ("金融類", ("金融", "銀行", "金控", "證券", "保險", "etf")),
         ("生技醫療類", ("生技", "醫療", "製藥", "藥品", "醫材")),
-        ("科技類", ("科技", "電子", "半導體", "asic", "ai", "伺服器", "網通", "記憶體", "pcb", "電腦", "銅箔基板")),
-        ("能源與原物料類", ("航運", "能源", "原物料", "石化", "鋼鐵", "銅價", "煤", "原油")),
+        ("科技類", (
+            "科技", "電子", "半導體", "asic", "ai", "伺服器", "網通", "記憶體", "pcb", "電腦", "銅箔基板",
+            "光電", "光學", "通信", "通訊", "網路", "電路板", "被動元件", "資訊", "軟體", "矽智財",
+            "電機機械", "機械電機",
+        )),
+        ("能源與原物料類", (
+            "航運", "能源", "原物料", "石化", "鋼鐵", "銅價", "煤", "原油", "化學", "塑膠", "水泥", "玻璃",
+        )),
         ("食品與消費類", ("食品", "餐飲", "消費", "零售")),
         ("電商與零售類", ("電商", "物流", "網購")),
-        ("綠能環保類", ("綠能", "環保", "太陽能", "風電", "電動車")),
-        ("遊戲娛樂類", ("遊戲", "娛樂", "影視", "電競")),
+        ("綠能環保類", ("綠能", "環保", "太陽能", "風電", "電動車", "重電")),
+        ("遊戲娛樂類", ("遊戲", "娛樂", "影視", "電競", "觀光遊樂", "文化創意")),
     )
     for theme_name, terms in rules:
         if any(term in value for term in terms):
@@ -269,7 +275,9 @@ class EntityResolver:
                 "data_source": result["data_source"],
             })
             is_company = result["entity_type"] in {"上市公司", "ETF"}
-            if is_company and result["theme_name"] != "其他":
+            # A company always links to its own stock; a theme is not required for that (an
+            # airline or a cement maker is filed under 「其他」 but is still a direct link).
+            if is_company:
                 theme_rows.append({
                     "theme_name": result["theme_name"],
                     "keyword": result["canonical_entity"],
