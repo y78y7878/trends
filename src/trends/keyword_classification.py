@@ -88,8 +88,9 @@ class GeminiKeywordClassifier:
 sub_theme 使用簡短繁體中文分類；confidence_score 範圍 0 到 1。
 link_type 只能是：
 - company：關鍵字就是一家台灣上市櫃公司或 ETF（例如「元大金控」「台積電」）。
-- industry：產業、產品或政策用語，熱門時可能帶動該主題的同類股票（例如「保險」「伺服器」「升息」）。
+- industry：直接描述該主題產業本身的用語（技術、原物料、產業名稱）或總體經濟、金融市場指標與政策，熱門時可能帶動該主題的同類股票（例如「保險」「伺服器」「先進封裝」「油價」「升息」「CPI」「外資」）。
 - none：其他一切，包括人名、未在台灣上市的外國公司、品牌、事件、娛樂或無法判斷者（例如「謝金河」「Uber」）。
+  以下也一律是 none：單一消費產品或型號（例如「AirPods 4」「HR-V」「Tesla Roadster」）、交通工具與軍事裝備（例如「機車」「波音787」「航空母艦」）、生活娛樂與活動（例如「夜市」「燒肉」「演唱會」）、個人理財生活用語（例如「套牢」「四貸同堂」）。
 無法判斷時 theme_name 用「其他」、link_type 用 none、confidence_score 用 0，不要臆測公司代號。
 只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","link_type":"none","confidence_score":0.0}}]}}。
 輸入：{json.dumps(keywords, ensure_ascii=False)}
