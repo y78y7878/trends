@@ -10,7 +10,8 @@ wheels/
 .venv
 # SQLite 資料庫檔案
 *.db
-!data.db
+# data.db is backed up daily to Google Drive by run_backup.bat (trends.db_backup), not kept in git:
+# at ~80 MB it was nearing GitHub's 100 MB per-file limit.
 *.sqlite
 *.sqlite3
 db.sqlite3

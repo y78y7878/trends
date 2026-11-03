@@ -82,7 +82,7 @@ uv sync                          # 或：python -m venv .venv; .venv\Scripts\pip
 GEMINI_API_KEY=<your-key>
 ```
 
-`data.db` 隨 repo 提供；程式啟動時會自動建立缺少的資料表。
+`data.db` 不在 repo 中（2026-11-03 起；約 80 MB，接近 GitHub 單檔 100 MB 上限）。每天 03:30 由 `run_backup.bat` 壓縮備份到 Google 雲端硬碟 `我的雲端硬碟\trends_backup\data_YYYYMMDD.zip`（保留 14 份；位置可用環境變數 `TRENDS_BACKUP_DIR` 改）。新電腦或還原時，在沒有排程執行的時候把 zip 中的 `data.db` 與 `data.gemini_progress.json` 解壓到專案根目錄；沒有 `data.db` 時程式會建立空的資料庫與資料表。
 
 ### 首次執行
 
@@ -139,9 +139,12 @@ Windows 工作排程器 \Trends\
 │         6. 新聞主題彙整              → news_theme_classification
 │         7. 主題每日統計              → theme_daily_stats
 │
-└─ Health Report    每天 07:30        run_health.bat
-     └─ trends.health_report（唯讀）
-          → logs\health_report.md：五個元件的狀態、健康度分數、今日新增量、覆蓋率、最近錯誤
+├─ Health Report    每天 07:30        run_health.bat
+│    └─ trends.health_report（唯讀）
+│         → logs\health_report.md：五個元件的狀態、健康度分數、今日新增量、覆蓋率、最近錯誤
+│
+└─ DB Backup        每天 03:30        run_backup.bat
+     └─ trends.db_backup（唯讀快照）→ Google 雲端硬碟 trends_backup\data_YYYYMMDD.zip，保留 14 份
 
 Streamlit Dashboard（app.py）── 唯讀查詢 data.db（快取 5 分鐘）
 ```

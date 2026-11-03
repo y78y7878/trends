@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $TaskPath = '\Trends\'
 
-foreach ($script in 'run.bat', 'run_stocks.bat', 'run_etl.bat', 'run_health.bat') {
+foreach ($script in 'run.bat', 'run_stocks.bat', 'run_etl.bat', 'run_health.bat', 'run_backup.bat') {
     if (-not (Test-Path (Join-Path $ProjectDir $script))) {
         throw "Missing $script in $ProjectDir"
     }
@@ -66,6 +66,13 @@ $tasks = @(
         Description = 'Read-only daily health report -> logs\health_report.md, daily 07:30'
         Trigger     = New-ScheduledTaskTrigger -Daily -At '07:30'
         Settings    = New-TrendsSettings 10
+    },
+    @{
+        Name        = 'DB Backup'
+        Script      = 'run_backup.bat'
+        Description = 'Zipped data.db snapshot -> Google Drive trends_backup (keeps 14), daily 03:30'
+        Trigger     = New-ScheduledTaskTrigger -Daily -At '03:30'
+        Settings    = New-TrendsSettings 15
     }
 )
 

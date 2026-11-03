@@ -1,6 +1,6 @@
 # Windows 工作排程器設定
 
-本專案的資料收集由 Windows 工作排程器（Task Scheduler）觸發三支批次檔，每支執行一次即結束，不需要常駐終端機。所有工作放在排程器的 `\Trends\` 資料夾。
+本專案的資料收集由 Windows 工作排程器（Task Scheduler）觸發五支批次檔，每支執行一次即結束，不需要常駐終端機。所有工作放在排程器的 `\Trends\` 資料夾。
 
 > 不要使用各模組的 `--schedule` 參數。它啟動的是 APScheduler 常駐程序，關閉終端機或重開機就會停止，且與工作排程器重複觸發。
 
@@ -11,7 +11,7 @@
 | `\Trends\RSS Collector` | `run.bat` | 每 20 分鐘 | 5 分鐘 | `google_trends`、`google_trends_news` | `logs\rss_collector.log` |
 | `\Trends\Stock Collector` | `run_stocks.bat` | 週一至週五 18:30 | 60 分鐘 | `stocks` | `logs\stock_collector.log` |
 | `\Trends\Health Report` | `run_health.bat` | 每天 07:30 | 10 分鐘 | 不寫入資料庫（唯讀），輸出 `logs\health_report.md` | `logs\health.log` |
-| `\Trends\Daily ETL` | `run_etl.bat` | 每天 02:00、08:00、14:00、20:00 | 180 分鐘 | `entity_master`、`keyword_classification`、`theme_mapping`、`google_trends_history`、`google_trends_news`（情緒欄位）、`news_theme_classification`、`theme_daily_stats` | `logs\etl.log` |
+| `\Trends\DB Backup` | `run_backup.bat` | 每天 03:30 | 15 分鐘 | 不寫入資料庫（唯讀快照），壓縮後寫到 Google 雲端硬碟 `trends_backup`，保留 14 份；exit 1 = 雲端硬碟未啟動等失敗 | `logs\db_backup.log` || `\Trends\Daily ETL` | `run_etl.bat` | 每天 02:00、08:00、14:00、20:00 | 180 分鐘 | `entity_master`、`keyword_classification`、`theme_mapping`、`google_trends_history`、`google_trends_news`（情緒欄位）、`news_theme_classification`、`theme_daily_stats` | `logs\etl.log` |
 
 共同設定：
 
