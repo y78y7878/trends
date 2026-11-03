@@ -244,7 +244,23 @@ def _label_event(event_item: pd.Series | dict[str, object]) -> str:
     return f"{keyword}（{event_date}）"
 
 
-def build_event_research_summary(performance: pd.DataFrame) -> dict[str, float | int | str | None]:
+def _abnormal(performance: pd.DataFrame, days: int, normal: dict[int, float] | None) -> pd.Series:
+    """Excess return after the event minus the stock's normal excess return (empty without one)."""
+    column = f"excess_{days}d"
+    if column not in performance or not normal or days not in normal:
+        return pd.Series(dtype=float)
+    return pd.to_numeric(performance[column], errors="coerce").dropna() - normal[days]
+
+
+def _t_stat(values: pd.Series) -> float:
+    if len(values) < 2 or values.std(ddof=1) < 1e-12:  # identical values: no t statistic
+        return float("nan")
+    return float(values.mean() / (values.std(ddof=1) / len(values) ** 0.5))
+
+
+def build_event_research_summary(
+    performance: pd.DataFrame, normal: dict[int, float] | None = None,
+) -> dict[str, float | int | str | None]:
     if performance.empty:
         return {
             "event_count": 0,
@@ -257,6 +273,9 @@ def build_event_research_summary(performance: pd.DataFrame) -> dict[str, float |
             "avg_return_3d_pct": None,
             "avg_return_5d_pct": None,
             "avg_return_10d_pct": None,
+            "avg_excess_5d_pct": None,
+            "avg_excess_10d_pct": None,
+            "avg_abnormal_10d_pct": None,
         }
 
     metric_columns = ["return_1d", "return_3d", "return_5d", "return_10d"]
@@ -291,6 +310,11 @@ def build_event_research_summary(performance: pd.DataFrame) -> dict[str, float |
         returns = pd.to_numeric(performance.get(column, pd.Series(dtype=float)), errors="coerce").dropna()
         suffix = column.replace("return_", "")
         summary[f"avg_return_{suffix}_pct"] = float(returns.mean() * 100) if not returns.empty else None
+    for days in (5, 10):
+        excess = pd.to_numeric(performance.get(f"excess_{days}d", pd.Series(dtype=float)), errors="coerce").dropna()
+        summary[f"avg_excess_{days}d_pct"] = float(excess.mean() * 100) if not excess.empty else None
+    abnormal = _abnormal(performance, 10, normal)
+    summary["avg_abnormal_10d_pct"] = float(abnormal.mean() * 100) if not abnormal.empty else None
     return summary
 
 
@@ -334,25 +358,36 @@ def build_event_research_overview(theme_name: str, start_date: date | pd.Timesta
     )
 
 
-def build_hypothesis_validation(performance: pd.DataFrame) -> list[dict[str, str | float | int]]:
+MIN_HYPOTHESIS_EVENTS = 10
+
+
+def build_hypothesis_validation(
+    performance: pd.DataFrame, normal: dict[int, float] | None = None,
+) -> list[dict[str, str | float | int]]:
+    """Verdicts use the 10-day excess return over 0050 minus the stock's normal excess return,
+    with a t statistic (|t| >= 2 roughly p < 0.05). Raw returns are not used: in a rising market
+    most events "work" by that measure, effect or not."""
     validations: list[dict[str, str | float | int]] = []
     if performance.empty:
         return []
 
-    ten_day_returns = pd.to_numeric(performance.get("return_10d", pd.Series(dtype=float)), errors="coerce").dropna()
-    positive_ratio = (ten_day_returns.gt(0).mean() * 100) if not ten_day_returns.empty else 0.0
-    if ten_day_returns.empty:
+    abnormal = _abnormal(performance, 10, normal)
+    t_value = _t_stat(abnormal)
+    if len(abnormal) < MIN_HYPOTHESIS_EVENTS:
         status = "資料不足"
-        reason = "10日報酬樣本不足。"
-    elif positive_ratio >= 55:
-        status = "成立"
-        reason = f"{len(performance)} 個事件中，{positive_ratio:.1f}% 於 10 日內產生正報酬。"
-    elif positive_ratio >= 40:
-        status = "部分成立"
-        reason = f"{len(performance)} 個事件中，{positive_ratio:.1f}% 於 10 日內產生正報酬。"
+        reason = f"可計算 10 日超額報酬的事件只有 {len(abnormal)} 個（至少需要 {MIN_HYPOTHESIS_EVENTS} 個）。"
     else:
-        status = "不成立"
-        reason = f"{len(performance)} 個事件中，{positive_ratio:.1f}% 於 10 日內產生正報酬。"
+        if abnormal.mean() > 0 and t_value >= 2:
+            status = "成立"
+        elif abnormal.mean() > 0 and t_value >= 1:
+            status = "部分成立"
+        else:
+            status = "不成立"
+        reason = (
+            f"{len(abnormal)} 個事件扣除 0050 與此股平常水準（{normal[10] * 100:+.1f}%）後，"
+            f"10 日平均超額報酬 {abnormal.mean() * 100:+.1f}%，t = {t_value:.1f}"
+            "（|t| ≥ 2 才算統計上顯著）。"
+        )
     validations.append({
         "title": "假說1：當搜尋熱度顯著提升時，股票較容易出現正報酬。",
         "status": status,
@@ -370,17 +405,18 @@ def build_hypothesis_validation(performance: pd.DataFrame) -> list[dict[str, str
     else:
         positive_group = performance[performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title().eq("Positive")]
         negative_group = performance[performance.get("news_sentiment", pd.Series(dtype=str)).fillna("Neutral").str.title().eq("Negative")]
-        pos_mean = positive_group["return_10d"].mean() if not positive_group.empty else float("nan")
-        neg_mean = negative_group["return_10d"].mean() if not negative_group.empty else float("nan")
+        measure = "excess_10d" if "excess_10d" in performance else "return_10d"
+        pos_mean = pd.to_numeric(positive_group[measure], errors="coerce").mean() if not positive_group.empty else float("nan")
+        neg_mean = pd.to_numeric(negative_group[measure], errors="coerce").mean() if not negative_group.empty else float("nan")
         if pd.isna(pos_mean) or pd.isna(neg_mean):
             status = "資料不足"
             basis = "Positive 或 Negative 樣本數不足。"
         elif pos_mean > neg_mean:
             status = "成立"
-            basis = f"Positive 事件平均 10 日報酬為 {pos_mean * 100:.1f}%；Negative 事件平均 10 日報酬為 {neg_mean * 100:.1f}% 。"
+            basis = f"Positive 事件平均 10 日{'超額' if measure == 'excess_10d' else ''}報酬為 {pos_mean * 100:.1f}%；Negative 事件為 {neg_mean * 100:.1f}%。"
         else:
             status = "不成立"
-            basis = f"Positive 事件平均 10 日報酬為 {pos_mean * 100:.1f}%；Negative 事件平均 10 日報酬為 {neg_mean * 100:.1f}% 。"
+            basis = f"Positive 事件平均 10 日{'超額' if measure == 'excess_10d' else ''}報酬為 {pos_mean * 100:.1f}%；Negative 事件為 {neg_mean * 100:.1f}%。"
         validations.append({
             "title": "假說2：正面新聞影響大於負面新聞。",
             "status": status,
@@ -584,12 +620,53 @@ def detect_research_events(
     ).reset_index(drop=True)
 
 
-def calculate_event_performance(events: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+def _benchmark_closes(benchmark: pd.DataFrame | None) -> pd.Series | None:
+    if benchmark is None or benchmark.empty:
+        return None
+    closes = benchmark.assign(date=pd.to_datetime(benchmark["date"], errors="coerce").dt.normalize())
+    closes = closes.dropna(subset=["date"]).drop_duplicates("date").set_index("date")["close"]
+    return pd.to_numeric(closes, errors="coerce").sort_index()
+
+
+def normal_excess_returns(
+    prices: pd.DataFrame,
+    benchmark: pd.DataFrame,
+    start_date: date | pd.Timestamp,
+    end_date: date | pd.Timestamp,
+) -> dict[int, float]:
+    """The stock's average N-day excess return over the benchmark, starting on *every* trading
+    day of the period. Event excess returns are judged against this: a stock that beat 0050 by
+    1% a week on ordinary days shows +1% after events too, without any event effect."""
+    bench = _benchmark_closes(benchmark)
+    if bench is None or prices.empty:
+        return {}
+    closes = prices.assign(date=pd.to_datetime(prices["date"], errors="coerce").dt.normalize())
+    closes = pd.to_numeric(closes.drop_duplicates("date").set_index("date")["close"], errors="coerce").sort_index()
+    bench = bench.reindex(closes.index)
+    in_period = (closes.index >= pd.Timestamp(start_date)) & (closes.index <= pd.Timestamp(end_date))
+    normal = {}
+    for days in RETURN_DAYS:
+        excess = (closes.shift(-days) / closes - 1) - (bench.shift(-days) / bench - 1)
+        values = excess[in_period].dropna()
+        if not values.empty:
+            normal[days] = float(values.mean())
+    return normal
+
+
+def calculate_event_performance(
+    events: pd.DataFrame, prices: pd.DataFrame, benchmark: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Returns from the event day's close (the first price at which a trend is visible).
+    With ``benchmark`` (date, close; e.g. 0050), ``excess_Nd`` is the return minus the
+    benchmark's over the same dates, so a rising market is not read as an event effect."""
     return_columns = [f"return_{days}d" for days in RETURN_DAYS]
+    excess_columns = [f"excess_{days}d" for days in RETURN_DAYS]
+    bench = _benchmark_closes(benchmark)
     columns = [
         *events.columns,
         "market_date",
         *return_columns,
+        *(excess_columns if bench is not None else []),
         "max_gain_10d",
         "max_loss_10d",
         "ma20_breakout_day",
@@ -636,6 +713,13 @@ def calculate_event_performance(events: pd.DataFrame, prices: pd.DataFrame) -> p
                 if future_position < len(stock_prices)
                 else pd.NA
             )
+            if bench is not None:
+                result[f"excess_{days}d"] = pd.NA
+                if future_position < len(stock_prices):
+                    start = bench.get(stock_prices.iloc[position]["date"])
+                    end = bench.get(stock_prices.iloc[future_position]["date"])
+                    if pd.notna(start) and pd.notna(end) and start:
+                        result[f"excess_{days}d"] = result[f"return_{days}d"] - (end / start - 1)
         future_prices = stock_prices.iloc[position + 1:position + 11]
         result["max_gain_10d"] = future_prices["high"].max() / base_close - 1 if future_prices["high"].notna().any() else pd.NA
         result["max_loss_10d"] = future_prices["low"].min() / base_close - 1 if future_prices["low"].notna().any() else pd.NA

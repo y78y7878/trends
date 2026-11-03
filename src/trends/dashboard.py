@@ -29,6 +29,7 @@ from trends.event_study import (
     build_event_research_text,
     build_hypothesis_validation,
     calculate_event_performance,
+    normal_excess_returns,
     detect_research_events,
     normalize_breakout_day,
 )
@@ -55,6 +56,8 @@ RESEARCH_START = pd.Timestamp(trends.event_study.RESEARCH_START_DATE)
 ANALYZED_SENTIMENTS = ("Positive", "Neutral", "Negative")
 UNANALYZED = "Unanalyzed"
 SENTIMENT_LABELS = {UNANALYZED: "未分析"}
+# Event returns are compared with this ETF so a rising market is not read as an event effect.
+BENCHMARK_STOCK = "0050"
 LINK_LABELS = {LINK_DIRECT: "直接（公司本身）", LINK_THEME: "主題（同類股）"}
 # Event-source filter: which theme_mapping.link_type values each choice keeps (empty = all).
 LINK_CHOICES = {"全部": (), LINK_LABELS[LINK_DIRECT]: (LINK_DIRECT,), LINK_LABELS[LINK_THEME]: (LINK_THEME,)}
@@ -225,14 +228,14 @@ def format_summary_value(value: object) -> str:
 
 def format_event_table_value(value: object, column_name: str | None = None) -> str:
     if value is None or pd.isna(value):
-        return "資料尚不足" if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")) else "N/A"
+        return "資料尚不足" if column_name and any(token in column_name for token in ("報酬", "超額", "漲幅", "跌幅", "反應")) else "N/A"
     if isinstance(value, pd.Timestamp):
         return value.strftime("%Y-%m-%d")
     if column_name == "首次反應天數":
         days = pd.to_numeric(value, errors="coerce")
         return f"{int(days)} 天" if pd.notna(days) else "資料尚不足"
     if isinstance(value, (float, int)):
-        if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")):
+        if column_name and any(token in column_name for token in ("報酬", "超額", "漲幅", "跌幅", "反應")):
             if column_name in {"MA20突破日", "MA60突破日"}:
                 return normalize_breakout_day(value)
             return f"{float(value):.2%}"
@@ -661,8 +664,10 @@ def page_event_study() -> None:
             ) or "無新聞",
             axis=1,
         )
-    performance = calculate_event_performance(triggers, prices)
-    summary = build_event_research_summary(performance)
+    benchmark = load_prices(BENCHMARK_STOCK, warmup_start)
+    performance = calculate_event_performance(triggers, prices, benchmark)
+    normal = normal_excess_returns(prices, benchmark, start_date, end_date)
+    summary = build_event_research_summary(performance, normal)
     sentiment_distribution = summarize_sentiment_distribution(news)
 
     prices["date"] = pd.to_datetime(prices["date"], errors="coerce").dt.normalize()
@@ -753,6 +758,9 @@ def page_event_study() -> None:
         ("平均3日報酬", summary["avg_return_3d_pct"]),
         ("平均5日報酬", summary["avg_return_5d_pct"]),
         ("平均10日報酬", summary["avg_return_10d_pct"]),
+        (f"平均5日超額報酬（扣 {BENCHMARK_STOCK}）", summary["avg_excess_5d_pct"]),
+        (f"平均10日超額報酬（扣 {BENCHMARK_STOCK}）", summary["avg_excess_10d_pct"]),
+        ("平均10日超額報酬（再扣平常水準）", summary["avg_abnormal_10d_pct"]),
     ]
     metric_cols = st.columns(3)
     for index, (label, value) in enumerate(summary_items):
@@ -768,7 +776,11 @@ def page_event_study() -> None:
             st.metric(label, rendered)
 
     st.subheader("Hypothesis Validation")
-    for hypothesis in build_hypothesis_validation(performance):
+    st.caption(
+        f"「超額報酬」= 事件後報酬 − 同期 {BENCHMARK_STOCK} 報酬；「再扣平常水準」再減去這檔股票在期間內"
+        "任一天起算的平均超額報酬。判斷熱搜是否有效應以最後這項為準：大盤或這檔股票本來就在漲時，原始報酬會高估效果。"
+    )
+    for hypothesis in build_hypothesis_validation(performance, normal):
         status_color = "green" if hypothesis["status"] == "成立" else "orange" if hypothesis["status"] == "部分成立" else "red" if hypothesis["status"] == "不成立" else "gray"
         st.markdown(f"### {hypothesis['title']}")
         st.markdown(f"**驗證結果：** <span style='color:{status_color};font-weight:700'>{hypothesis['status']}</span>", unsafe_allow_html=True)
@@ -840,6 +852,7 @@ def page_event_study() -> None:
     display = performance.rename(columns={
         "event_date": "事件日期", "keyword": "關鍵字", "theme": "主題", "stock_id": "股票",
         "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "rss_traffic": "熱搜流量",
+        "excess_5d": "5日超額", "excess_10d": "10日超額",
         "trigger": "觸發原因", "link_type": "事件來源", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
@@ -851,7 +864,7 @@ def page_event_study() -> None:
         display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
     display = display[[
         "事件日期", "關鍵字", "主題", "股票", "事件來源", "觸發原因", "熱搜流量", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
-        "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
+        "5日報酬", "10日報酬", "5日超額", "10日超額", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
     ]]
     st.dataframe(display, hide_index=True)
 

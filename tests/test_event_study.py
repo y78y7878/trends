@@ -8,8 +8,10 @@ from trends.event_study import (
     build_event_research_overview,
     build_event_research_summary,
     build_event_research_text,
+    build_hypothesis_validation,
     calculate_event_performance,
     detect_research_events,
+    normal_excess_returns,
 )
 
 
@@ -94,6 +96,33 @@ class ResearchEventTests(unittest.TestCase):
         self.assertAlmostEqual(result["return_3d"], 0.03)
         self.assertAlmostEqual(result["max_gain_10d"], 0.20)
         self.assertAlmostEqual(result["max_loss_10d"], -0.09)
+
+    def test_excess_returns_subtract_the_benchmark_over_the_same_days(self) -> None:
+        dates = pd.bdate_range("2026-09-01", periods=12)
+        prices = pd.DataFrame({"date": dates, "stock_id": "2330", "close": [100 + 2 * i for i in range(12)],
+                               "high": 200, "low": 1})
+        benchmark = pd.DataFrame({"date": dates, "close": [100 + i for i in range(12)]})
+        events = pd.DataFrame([{"event_date": dates[0], "keyword": "AI", "stock_id": "2330"}])
+
+        result = calculate_event_performance(events, prices, benchmark).iloc[0]
+
+        self.assertAlmostEqual(result["return_5d"], 0.10)
+        self.assertAlmostEqual(result["excess_5d"], 0.10 - 0.05)
+
+    def test_rising_stock_with_no_event_effect_is_not_called_a_success(self) -> None:
+        # The stock beats the benchmark by the same margin every day; events add nothing.
+        dates = pd.bdate_range("2026-08-03", periods=80)
+        prices = pd.DataFrame({"date": dates, "stock_id": "2330", "close": [100 * 1.01 ** i for i in range(80)],
+                               "high": 1e9, "low": 1})
+        benchmark = pd.DataFrame({"date": dates, "close": [100.0] * 80})
+        events = pd.DataFrame([{"event_date": dates[i], "keyword": "AI", "stock_id": "2330"} for i in range(0, 60, 4)])
+        performance = calculate_event_performance(events, prices, benchmark)
+        normal = normal_excess_returns(prices, benchmark, dates[0], dates[-1])
+
+        self.assertGreater(performance["return_10d"].astype(float).gt(0).mean(), 0.99)
+        verdict = build_hypothesis_validation(performance, normal)[0]
+        self.assertEqual(verdict["status"], "不成立")
+        self.assertAlmostEqual(build_event_research_summary(performance, normal)["avg_abnormal_10d_pct"], 0.0, places=6)
 
     def test_summary_and_narrative_are_generated(self) -> None:
         performance = pd.DataFrame([
