@@ -12,6 +12,8 @@ from sqlalchemy import String, func, select, type_coerce
 
 import trends.event_study
 from trends.database import (
+    LINK_DIRECT,
+    LINK_THEME,
     GoogleTrend,
     GoogleTrendNews,
     GoogleTrendsHistory,
@@ -27,6 +29,7 @@ from trends.event_study import (
     build_event_research_text,
     build_hypothesis_validation,
     calculate_event_performance,
+    normal_excess_returns,
     detect_research_events,
     normalize_breakout_day,
 )
@@ -53,6 +56,11 @@ RESEARCH_START = pd.Timestamp(trends.event_study.RESEARCH_START_DATE)
 ANALYZED_SENTIMENTS = ("Positive", "Neutral", "Negative")
 UNANALYZED = "Unanalyzed"
 SENTIMENT_LABELS = {UNANALYZED: "未分析"}
+# Event returns are compared with this ETF so a rising market is not read as an event effect.
+BENCHMARK_STOCK = "0050"
+LINK_LABELS = {LINK_DIRECT: "直接（公司本身）", LINK_THEME: "主題（同類股）"}
+# Event-source filter: which theme_mapping.link_type values each choice keeps (empty = all).
+LINK_CHOICES = {"全部": (), LINK_LABELS[LINK_DIRECT]: (LINK_DIRECT,), LINK_LABELS[LINK_THEME]: (LINK_THEME,)}
 SENTIMENT_COVERAGE_MIN_PCT = 20.0
 LOW_SENTIMENT_COVERAGE_MESSAGE = "情緒樣本不足，請謹慎解讀"
 
@@ -220,19 +228,21 @@ def format_summary_value(value: object) -> str:
 
 def format_event_table_value(value: object, column_name: str | None = None) -> str:
     if value is None or pd.isna(value):
-        return "資料尚不足" if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")) else "N/A"
+        return "資料尚不足" if column_name and any(token in column_name for token in ("報酬", "超額", "漲幅", "跌幅", "反應")) else "N/A"
     if isinstance(value, pd.Timestamp):
         return value.strftime("%Y-%m-%d")
     if column_name == "首次反應天數":
         days = pd.to_numeric(value, errors="coerce")
         return f"{int(days)} 天" if pd.notna(days) else "資料尚不足"
     if isinstance(value, (float, int)):
-        if column_name and any(token in column_name for token in ("報酬", "漲幅", "跌幅", "反應")):
+        if column_name and any(token in column_name for token in ("報酬", "超額", "漲幅", "跌幅", "反應")):
             if column_name in {"MA20突破日", "MA60突破日"}:
                 return normalize_breakout_day(value)
             return f"{float(value):.2%}"
         if column_name == "事件熱度":
             return f"{float(value):.0f}"
+        if column_name == "熱搜流量":
+            return f"{int(value):,}+"
         if column_name in {"MA20突破日", "MA60突破日"}:
             return normalize_breakout_day(value)
         return str(value)
@@ -297,6 +307,16 @@ def prepare_theme_news(observations: pd.DataFrame, keywords: list[str]) -> pd.Da
     return news.dropna(subset=["date"])[columns]
 
 
+def prepare_theme_rss(observations: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
+    """One row per RSS trend of these keywords: its Asia/Taipei day and approx_traffic."""
+    columns = ["date", "keyword", "approx_traffic"]
+    if observations.empty or not keywords:
+        return pd.DataFrame(columns=columns)
+    trends = observations[observations["keyword"].isin(keywords)].drop_duplicates("trend_id").copy()
+    trends["date"] = utc_series_to_taipei_date(trends["published_at"].fillna(trends["fetched_at"]))
+    return trends.dropna(subset=["date"])[columns]
+
+
 def render_overview_cards(cards: list[tuple[str, str]]) -> None:
     for column, (title, body) in zip(st.columns(len(cards)), cards):
         with column, st.container(border=True):
@@ -309,7 +329,7 @@ def page_project_overview() -> None:
     st.markdown("#### 從資料收集、清洗、AI 分析到 Dashboard 展示的自動化資料系統")
     st.markdown("**專案成果摘要**")
     render_overview_cards([
-        ("✔ 開發期間：至今約1.5 個月", "尚未完成所有功能，持續開發中"),
+        ("✔ 全自動運作", "每 20 分鐘收集熱搜，每天自動分類、補股價、健康檢查與雲端備份"),
         ("✔ Python", "Pandas 資料處理與自動化"),
         ("✔ ETL", "自動收集、清洗，集中存入 SQLite"),
     ])
@@ -409,6 +429,27 @@ def page_project_overview() -> None:
     st.caption("事件研究將股價、搜尋熱度、新聞情緒與事件日期整合於同一張圖，幫助快速理解事件發生後的變化。請由上方導覽列切換至「市場雷達」與「事件研究」查看實際畫面。")
 
     st.divider()
+    st.subheader("研究發現")
+    st.markdown("回到最初的問題：**看到熱搜或新聞的時候，是不是已經太晚了？** 目前的資料顯示：**是的。**")
+    render_overview_cards([
+        ("熱搜當天：股價波動是平常的 2 倍",
+         "公司登上熱搜的當天，股價平均波動約 5.1%（平常約 2.5%），扣掉大盤後平均多 1.3%。"
+         "比較像是**股價先大動，大家才去搜尋**。"),
+        ("熱搜之後：沒有可利用的超額報酬",
+         "從熱搜當天收盤起算，之後 1～10 日扣掉大盤與這檔股票的平常水準後，平均接近 0，"
+         "10 日甚至略低於平常水準。看到熱搜時，行情多半已經反映完。"),
+        ("同類股連動：目前未獲支持",
+         "產業詞上熱搜後，同類股籃子看似上漲 1.3%，但這些籃子在任何一天起算本來就有約 1% 的漲幅，"
+         "扣掉後只剩 +0.1%，看不出熱搜帶來的效果。"),
+    ])
+    st.caption(
+        "2026-11-03 分析，資料期間 2026-08-21～11-02（約 2.5 個月）。報酬一律扣除同期 0050 與個股平常水準，"
+        "並從熱搜當天收盤起算。樣本仍少，結論會隨資料累積每月重跑更新（tools/hypothesis_study.py，"
+        "紀錄見 docs/hypothesis_study.md）。這是歷史關聯研究，不是投資建議。"
+    )
+    st.markdown("> **找不到效果也是結論：用對照組排除假訊號，比找到一個好看的數字更重要。**")
+
+    st.divider()
     st.subheader("資料品質與 ETL")
     render_overview_cards([
         ("1. 去除重複", "同一筆熱搜中的相同新聞網址只保留一筆，避免重複收集造成分析失真"),
@@ -435,6 +476,16 @@ def page_project_overview() -> None:
         ("案例 1：重複資料", "**問題：** 重複資料\n\n**解法：** 唯一條件與去重機制\n\n**成果：** 重複執行仍保持正確"),
         ("案例 2：日期偏移", "**問題：** 日期偏移\n\n**解法：** 統一國際時間與台灣時間的換算規則\n\n**成果：** 事件歸屬正確"),
         ("案例 3：情緒失真", "**問題：** 未分析資料造成情緒失真\n\n**解法：** 區分「尚未分析」與「中性」\n\n**成果：** 提升資料可信度"),
+    ])
+    render_overview_cards([
+        ("案例 4：大盤造成的假訊號",
+         "**問題：** 行情上漲時，大部分事件的報酬都是正的，看起來「熱搜有效」\n\n"
+         "**解法：** 扣除同期 0050，再扣除個股任一天起算的平常水準，並用 t 值判斷是否顯著\n\n"
+         "**成果：** 原本看似成立的假說，正確判定為未獲支持"),
+        ("案例 5：AI 把關鍵字連錯股票",
+         "**問題：** AI 把「Uber」連到 78 檔科技股、把「冠德」連到別家公司的代號\n\n"
+         "**解法：** 區分「公司本身」與「產業詞」兩種連結，股票代號比對證交所官方名稱\n\n"
+         "**成果：** 停用約 1 萬 2 千筆錯誤連結，每家公司只連到自己的股票"),
     ])
 
     st.divider()
@@ -509,7 +560,9 @@ def build_market_radar() -> pd.DataFrame:
         daily_heat = history.rename(columns={"trend_date": "date", "trend_score": "heat"})
         daily_heat = daily_heat[daily_heat["keyword"].isin(keywords)][["date", "keyword", "heat"]] if not history.empty else pd.DataFrame()
         news_for_events = news[["date", "keyword", "news_id"]] if not news.empty else pd.DataFrame()
-        triggers = detect_research_events(daily_heat, news_for_events)
+        triggers = detect_research_events(
+            daily_heat, news_for_events, daily_rss=prepare_theme_rss(observations, keywords)
+        )
         mapping = mappings[
             mappings["theme_name"].eq(theme_name)
             & mappings["active"].astype(str).str.casefold().isin(("1", "true"))
@@ -577,6 +630,7 @@ def page_event_study() -> None:
         if not stock_ids:
             stock_ids = themes[theme_name]["stock_ids"]
         stock_id = st.selectbox("股票", stock_ids, key="study_stock")
+        link_choice = st.selectbox("事件來源", list(LINK_CHOICES), key="study_link_type")
 
     history = load_theme_history(theme_name, lookback_days=365)
     warmup_start = (RESEARCH_START - pd.Timedelta(days=100)).date()
@@ -610,6 +664,12 @@ def page_event_study() -> None:
         theme_mapping["stock_id"].astype(str).eq(str(stock_id))
         & theme_mapping["active"].astype(str).str.casefold().isin(("1", "true"))
     ]
+    if LINK_CHOICES[link_choice]:
+        selected_mapping = selected_mapping[selected_mapping["link_type"].isin(LINK_CHOICES[link_choice])]
+        if selected_mapping.empty:
+            show_empty(f"這檔股票沒有「{link_choice}」的關鍵字。")
+            return
+    link_labels = selected_mapping.drop_duplicates("keyword").set_index("keyword")["link_type"].map(LINK_LABELS)
     selected_keywords = selected_mapping["keyword"].dropna().astype(str).tolist() or theme_keywords
     history = history[history["keyword"].isin(selected_keywords)].copy()
     history["date"] = pd.to_datetime(history["trend_date"], errors="coerce").dt.normalize()
@@ -617,11 +677,14 @@ def page_event_study() -> None:
     observations = load_trend_observations()
     news = prepare_theme_news(observations, selected_keywords)
     news_for_events = news[["date", "keyword", "news_id"]] if not news.empty else news
-    triggers = detect_research_events(daily_heat, news_for_events)
+    triggers = detect_research_events(
+        daily_heat, news_for_events, daily_rss=prepare_theme_rss(observations, selected_keywords)
+    )
     triggers = triggers[triggers["event_date"].between(start_date, end_date)]
     if not triggers.empty:
         triggers["theme"] = theme_name
         triggers["stock_id"] = str(stock_id)
+        triggers["link_type"] = triggers["keyword"].map(link_labels).fillna("—")
         sentiment_counts = news.groupby(["date", "keyword", "news_sentiment"]).size()
         triggers["news_sentiment"] = triggers.apply(
             lambda row: ", ".join(
@@ -632,8 +695,10 @@ def page_event_study() -> None:
             ) or "無新聞",
             axis=1,
         )
-    performance = calculate_event_performance(triggers, prices)
-    summary = build_event_research_summary(performance)
+    benchmark = load_prices(BENCHMARK_STOCK, warmup_start)
+    performance = calculate_event_performance(triggers, prices, benchmark)
+    normal = normal_excess_returns(prices, benchmark, start_date, end_date)
+    summary = build_event_research_summary(performance, normal)
     sentiment_distribution = summarize_sentiment_distribution(news)
 
     prices["date"] = pd.to_datetime(prices["date"], errors="coerce").dt.normalize()
@@ -724,6 +789,9 @@ def page_event_study() -> None:
         ("平均3日報酬", summary["avg_return_3d_pct"]),
         ("平均5日報酬", summary["avg_return_5d_pct"]),
         ("平均10日報酬", summary["avg_return_10d_pct"]),
+        (f"平均5日超額報酬（扣 {BENCHMARK_STOCK}）", summary["avg_excess_5d_pct"]),
+        (f"平均10日超額報酬（扣 {BENCHMARK_STOCK}）", summary["avg_excess_10d_pct"]),
+        ("平均10日超額報酬（再扣平常水準）", summary["avg_abnormal_10d_pct"]),
     ]
     metric_cols = st.columns(3)
     for index, (label, value) in enumerate(summary_items):
@@ -739,7 +807,11 @@ def page_event_study() -> None:
             st.metric(label, rendered)
 
     st.subheader("Hypothesis Validation")
-    for hypothesis in build_hypothesis_validation(performance):
+    st.caption(
+        f"「超額報酬」= 事件後報酬 − 同期 {BENCHMARK_STOCK} 報酬；「再扣平常水準」再減去這檔股票在期間內"
+        "任一天起算的平均超額報酬。判斷熱搜是否有效應以最後這項為準：大盤或這檔股票本來就在漲時，原始報酬會高估效果。"
+    )
+    for hypothesis in build_hypothesis_validation(performance, normal):
         status_color = "green" if hypothesis["status"] == "成立" else "orange" if hypothesis["status"] == "部分成立" else "red" if hypothesis["status"] == "不成立" else "gray"
         st.markdown(f"### {hypothesis['title']}")
         st.markdown(f"**驗證結果：** <span style='color:{status_color};font-weight:700'>{hypothesis['status']}</span>", unsafe_allow_html=True)
@@ -810,7 +882,9 @@ def page_event_study() -> None:
     st.subheader("事件績效")
     display = performance.rename(columns={
         "event_date": "事件日期", "keyword": "關鍵字", "theme": "主題", "stock_id": "股票",
-        "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "return_1d": "1日報酬",
+        "news_sentiment": "新聞情緒", "event_heat": "事件熱度", "rss_traffic": "熱搜流量",
+        "excess_5d": "5日超額", "excess_10d": "10日超額",
+        "trigger": "觸發原因", "link_type": "事件來源", "return_1d": "1日報酬",
         "return_3d": "3日報酬", "return_5d": "5日報酬", "return_10d": "10日報酬",
         "max_gain_10d": "最大漲幅", "max_loss_10d": "最大跌幅",
         "reaction_days": "首次反應天數",
@@ -820,8 +894,8 @@ def page_event_study() -> None:
     for column in display.columns:
         display[column] = display[column].map(lambda value: format_event_table_value(value, str(column)))
     display = display[[
-        "事件日期", "關鍵字", "主題", "股票", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
-        "5日報酬", "10日報酬", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
+        "事件日期", "關鍵字", "主題", "股票", "事件來源", "觸發原因", "熱搜流量", "新聞情緒", "事件熱度", "1日報酬", "3日報酬",
+        "5日報酬", "10日報酬", "5日超額", "10日超額", "最大漲幅", "最大跌幅", "首次反應天數", "MA20突破日", "MA60突破日",
     ]]
     st.dataframe(display, hide_index=True)
 

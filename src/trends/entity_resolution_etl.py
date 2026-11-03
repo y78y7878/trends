@@ -15,6 +15,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.database import (
+    LINK_DIRECT,
     EntityMaster,
     GoogleTrend,
     KeywordClassification,
@@ -22,8 +23,10 @@ from trends.database import (
     get_engine,
     init_db,
 )
-from trends.keyword_classification import ALLOWED_THEMES, _generate_json
+from trends.gemini_control import GeminiProgress, gemini_models, should_stop_batches
+from trends.keyword_classification import ALLOWED_THEMES, _generate_json, _reactivating_insert
 from trends.keyword_mapping import load_keyword_mapping
+from trends.listed_companies import load_listed, name_matches
 from trends.theme_study import normalize_theme_name
 
 
@@ -33,6 +36,11 @@ ENTITY_TYPES = (
     "政府機構", "交通運輸", "公共議題", "新聞媒體", "其他",
 )
 RESOLVED_ENTITY_TYPES = set(ENTITY_TYPES) - {"其他"}
+# Everyday words that are also a company's short name. As a trending search they almost never
+# mean the company, so they are never resolved to its stock (「創意電子」 still is).
+AMBIGUOUS_COMPANY_WORDS = frozenset({"創意", "全新"})
+LISTED_CODE = re.compile(r"\d{4,6}[A-Z]?")
+YEAR_LIKE = re.compile(r"20[23]\d")
 MIN_CONFIDENCE = 0.6
 BATCH_SIZE = 20
 
@@ -55,12 +63,18 @@ def _theme_for_industry(industry: str) -> str:
     rules = (
         ("金融類", ("金融", "銀行", "金控", "證券", "保險", "etf")),
         ("生技醫療類", ("生技", "醫療", "製藥", "藥品", "醫材")),
-        ("科技類", ("科技", "電子", "半導體", "asic", "ai", "伺服器", "網通", "記憶體", "pcb", "電腦", "銅箔基板")),
-        ("能源與原物料類", ("航運", "能源", "原物料", "石化", "鋼鐵", "銅價", "煤", "原油")),
+        ("科技類", (
+            "科技", "電子", "半導體", "asic", "ai", "伺服器", "網通", "記憶體", "pcb", "電腦", "銅箔基板",
+            "光電", "光學", "通信", "通訊", "網路", "電路板", "被動元件", "資訊", "軟體", "矽智財",
+            "電機機械", "機械電機",
+        )),
+        ("能源與原物料類", (
+            "航運", "能源", "原物料", "石化", "鋼鐵", "銅價", "煤", "原油", "化學", "塑膠", "水泥", "玻璃",
+        )),
         ("食品與消費類", ("食品", "餐飲", "消費", "零售")),
         ("電商與零售類", ("電商", "物流", "網購")),
-        ("綠能環保類", ("綠能", "環保", "太陽能", "風電", "電動車")),
-        ("遊戲娛樂類", ("遊戲", "娛樂", "影視", "電競")),
+        ("綠能環保類", ("綠能", "環保", "太陽能", "風電", "電動車", "重電")),
+        ("遊戲娛樂類", ("遊戲", "娛樂", "影視", "電競", "觀光遊樂", "文化創意")),
     )
     for theme_name, terms in rules:
         if any(term in value for term in terms):
@@ -73,7 +87,7 @@ class EntityBatchClassifier(Protocol):
 
 
 class GeminiEntityClassifier:
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not resolved_key:
@@ -81,7 +95,7 @@ class GeminiEntityClassifier:
         from google import genai
 
         self._client = genai.Client(api_key=resolved_key)
-        self._model = model
+        self._models = (model,) if model else gemini_models()
 
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]:
         prompt = f"""
@@ -89,11 +103,12 @@ class GeminiEntityClassifier:
 entity_type 只能是：{', '.join(ENTITY_TYPES)}。
 theme_name 只能是：{', '.join(ALLOWED_THEMES)}。
 只有確定是台灣上市櫃公司時才填 stock_id；無法確認時留空，不得臆測。
+一般用語剛好與公司簡稱相同時（例如「創意」「全新」），除非關鍵字明確指公司（例如「創意電子」「全新股價」），不要判斷為上市公司。
 confidence_score 範圍為 0 到 1。無法辨識時 entity_type 填「其他」、confidence_score 填 0。
 每個關鍵字一筆，輸出 JSON：{{"items":[{{"keyword":"","canonical_entity":"","entity_type":"","stock_id":"","industry":"","theme_name":"","confidence_score":0.0}}]}}
 關鍵字：{json.dumps(keywords, ensure_ascii=False)}
 """
-        payload = _generate_json(self._client, self._model, prompt)
+        payload = _generate_json(self._client, self._models, prompt, task="entity", items=len(keywords))
         return {
             str(item.get("keyword", "")): item
             for item in payload.get("items", [])
@@ -121,9 +136,12 @@ class EntityResolver:
         engine: Engine,
         classifier: EntityBatchClassifier | None = None,
         seed_path: str | Path = DEFAULT_ENTITY_SEED_PATH,
+        listed: dict[str, str] | None = None,
     ) -> None:
         self.engine = init_db(engine)
         self.classifier = classifier
+        # Official code -> name list; loaded on first use (None) so seed-only runs need no network.
+        self._listed = listed
         self.seeds = _load_entity_seeds(seed_path)
         self.keyword_mapping = load_keyword_mapping()
         self.seed_aliases: dict[str, dict[str, str]] = {}
@@ -148,6 +166,40 @@ class EntityResolver:
         except RuntimeError:
             return None
         return self.classifier
+
+    def _code_matches_name(self, result: dict[str, object]) -> bool:
+        """False when a Gemini stock code belongs to a differently named listed company.
+        Codes missing from the official list (e.g. emerging or innovation-board stocks) pass."""
+        stock_id = str(result["stock_id"])
+        if not stock_id:
+            return True
+        if self._listed is None:
+            self._listed = load_listed()
+        official = self._listed.get(stock_id)
+        return official is None or name_matches(str(result["canonical_entity"]), official)
+
+    def _resolve_listed_code(self, keyword: str) -> dict[str, object] | None:
+        """A keyword that is itself a listed code (e.g. 「6467」) is that company; Gemini often
+        guessed a different name for bare codes. Year-like codes (2020-2039) are left alone,
+        since a trending 「2025」 means the year far more often than 千興."""
+        code = keyword.strip().upper()
+        if not LISTED_CODE.fullmatch(code) or YEAR_LIKE.fullmatch(code):
+            return None
+        if self._listed is None:
+            self._listed = load_listed()
+        official = self._listed.get(code)
+        if not official:
+            return None
+        is_etf = code.startswith("00")
+        return {
+            "canonical_entity": official,
+            "entity_type": "ETF" if is_etf else "上市公司",
+            "stock_id": code,
+            "industry": "ETF" if is_etf else "",
+            "theme_name": "金融類" if is_etf else "其他",
+            "confidence_score": 1.0,
+            "data_source": "listed_companies",
+        }
 
     def _resolve_known_company(self, keyword: str) -> dict[str, object] | None:
         normalized = normalize_entity_keyword(keyword)
@@ -229,7 +281,7 @@ class EntityResolver:
         stock_id = str(prediction.get("stock_id", "")).strip().upper()
         industry = str(prediction.get("industry", "")).strip()
         if entity_type in {"上市公司", "ETF"}:
-            if not re.fullmatch(r"\d{4,6}", stock_id):
+            if not re.fullmatch(r"\d{4,6}[A-Z]?", stock_id):  # ETFs such as 00631L, 00981A
                 return None
             theme_name = "金融類" if entity_type == "ETF" else _theme_for_industry(industry)
         else:
@@ -263,7 +315,9 @@ class EntityResolver:
                 "data_source": result["data_source"],
             })
             is_company = result["entity_type"] in {"上市公司", "ETF"}
-            if is_company and result["theme_name"] != "其他":
+            # A company always links to its own stock; a theme is not required for that (an
+            # airline or a cement maker is filed under 「其他」 but is still a direct link).
+            if is_company:
                 theme_rows.append({
                     "theme_name": result["theme_name"],
                     "keyword": result["canonical_entity"],
@@ -271,6 +325,7 @@ class EntityResolver:
                     "category": result["theme_name"],
                     "sub_theme": result["industry"] or "公司與股票",
                     "active": 1,
+                    "link_type": LINK_DIRECT,
                 })
             classification_rows.append({
                 "keyword": keyword,
@@ -292,10 +347,7 @@ class EntityResolver:
                 "entity_type", "stock_id", "industry", "theme_name", "confidence_score", "data_source"
             )},
         )
-        theme_statement = (
-            insert(ThemeMapping.__table__).values(theme_rows).on_conflict_do_nothing()
-            if theme_rows else None
-        )
+        theme_statement = _reactivating_insert(theme_rows) if theme_rows else None
         classification_statement = insert(KeywordClassification.__table__).values(classification_rows)
         classification_statement = classification_statement.on_conflict_do_update(
             index_elements=["keyword"],
@@ -351,39 +403,62 @@ class EntityResolver:
                 .distinct()
                 .order_by(GoogleTrend.keyword)
             )
-            if limit > 0:
-                statement = statement.limit(limit)
             keywords = [str(keyword) for keyword in connection.execute(statement).scalars()]
 
         if not keywords:
             return 0
-        saved = 0
         size = max(batch_size, 1)
-        for start in range(0, len(keywords), size):
-            batch = keywords[start:start + size]
-            results: list[tuple[str, dict[str, object]]] = []
-            unresolved = []
-            for keyword in batch:
-                known = self._resolve_known_company(keyword) or self._resolve_industry(keyword)
-                if known is None:
-                    unresolved.append(keyword)
-                else:
-                    results.append((keyword, known))
+        # Seed and industry rules cost nothing, so they run on every pending keyword. ``limit``
+        # bounds only the Gemini-bound remainder; capping the whole list let a stuck alphabetical
+        # prefix hide seed companies further down whenever Gemini was unavailable.
+        known_results: list[tuple[str, dict[str, object]]] = []
+        unresolved_all: list[str] = []
+        for keyword in keywords:
+            known = (
+                self._resolve_known_company(keyword)
+                or self._resolve_listed_code(keyword)
+                or self._resolve_industry(keyword)
+            )
+            if known is None:
+                unresolved_all.append(keyword)
+            else:
+                known_results.append((keyword, known))
+        saved = 0
+        for start in range(0, len(known_results), size):
+            saved += self._save_batch(known_results[start:start + size])
 
-            classifier = self._get_classifier() if unresolved else None
-            if unresolved and classifier is not None:
-                try:
-                    predictions = classifier.classify_batch(unresolved)
-                except Exception as error:
-                    print(f"Entity AI batch failed ({len(unresolved)} keywords): {error}")
-                    if "quota exceeded" in str(error).casefold() and ("perday" in str(error).casefold() or "per day" in str(error).casefold()):
-                        saved += self._save_batch(results)
-                        break
-                    predictions = {}
-                for keyword in unresolved:
-                    result = self._normalize_prediction(predictions.get(keyword, {}))
-                    if result is not None:
-                        results.append((keyword, result))
+        # Resume: keywords Gemini already answered stay pending when it found no entity (or the
+        # theme stays 「其他」); never re-send them.
+        progress = GeminiProgress.for_engine(self.engine)
+        done = progress.done("entity")
+        unresolved_all = [keyword for keyword in unresolved_all if keyword not in done]
+        if limit > 0:
+            unresolved_all = unresolved_all[:limit]
+        classifier = self._get_classifier() if unresolved_all else None
+        if classifier is None:
+            return saved
+        for start in range(0, len(unresolved_all), size):
+            unresolved = unresolved_all[start:start + size]
+            try:
+                predictions = classifier.classify_batch(unresolved)
+            except Exception as error:
+                print(f"Entity AI batch failed ({len(unresolved)} keywords): {error}")
+                if should_stop_batches(error):
+                    break
+                continue
+            # Only keywords Gemini actually answered count as done; omitted ones retry next run.
+            progress.mark("entity", [keyword for keyword in unresolved if keyword in predictions])
+            results = []
+            for keyword in unresolved:
+                result = self._normalize_prediction(predictions.get(keyword, {}))
+                if result is not None and result["stock_id"] and normalize_entity_keyword(keyword) in AMBIGUOUS_COMPANY_WORDS:
+                    result = None
+                if result is not None and not self._code_matches_name(result):
+                    print(f"[ENTITY] rejected {keyword}: {result['stock_id']} is "
+                          f"{self._listed.get(result['stock_id'])}, not {result['canonical_entity']}")
+                    result = None
+                if result is not None:
+                    results.append((keyword, result))
             saved += self._save_batch(results)
         return saved
 

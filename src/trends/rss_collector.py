@@ -5,12 +5,14 @@
   fetched_at keeps the first observation. ``RETURNING trend_id`` links news to the existing row.
 - ``google_trends_news``: insert-or-ignore on (trend_id, news_url), so analysed sentiment is never
   overwritten.
+- ``google_trends_observations``: one row per run per trend with that run's approx_traffic, so time
+  on the list and traffic growth survive the google_trends upsert.
 - Refuses to run until the database is migrated (user_version >= 2 and unique indexes present).
 
 Usage::
 
     python -m trends.rss_collector --once        # one fetch, for Windows Task Scheduler (run.bat)
-    python -m trends.rss_collector --schedule    # long-running, every 10 minutes
+    python -m trends.rss_collector --schedule    # long-running, every 20 minutes
     python -m trends.rss_collector --once --db backups\\rehearsal_p0_1.db   # verify against a copy
 """
 from __future__ import annotations
@@ -35,7 +37,8 @@ from trends.timeutil import format_db_datetime, utc_now
 RSS_URL = "https://trends.google.com/trending/rss?geo=TW"
 NAMESPACES = {"ht": "https://trends.google.com/trending/rss"}
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-DEFAULT_INTERVAL_MINUTES = 10
+# The feed holds the newest 10 trends, each for about an hour; 20 minutes misses about 1% of them.
+DEFAULT_INTERVAL_MINUTES = 20
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,11 @@ INSERT_NEWS = text(
     "INSERT INTO google_trends_news (trend_id, news_title, news_url, news_source, fetched_at) "
     "VALUES (:trend_id, :news_title, :news_url, :news_source, :fetched_at) "
     "ON CONFLICT (trend_id, news_url) DO NOTHING"
+)
+INSERT_OBSERVATION = text(
+    "INSERT INTO google_trends_observations (trend_id, observed_at, approx_traffic) "
+    "VALUES (:trend_id, :observed_at, :approx_traffic) "
+    "ON CONFLICT (trend_id, observed_at) DO NOTHING"
 )
 
 
@@ -145,6 +153,9 @@ def store_items(engine: Engine, items: list[TrendItem], fetched_at: str | None =
                 trend_id = connection.execute(UPSERT_TREND, {
                     **key, "approx_traffic": item.approx_traffic, "fetched_at": observed_at,
                 }).scalar_one()
+                connection.execute(INSERT_OBSERVATION, {
+                    "trend_id": trend_id, "observed_at": observed_at, "approx_traffic": item.approx_traffic,
+                })
                 for news in item.news:
                     result.new_news += connection.execute(INSERT_NEWS, {
                         "trend_id": trend_id,

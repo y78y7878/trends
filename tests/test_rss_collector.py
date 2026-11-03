@@ -89,6 +89,17 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.rows("SELECT COUNT(*) FROM google_trends_news")[0][0], 3)
         self.assertEqual(self.rows("SELECT approx_traffic FROM google_trends WHERE keyword = '台積電'")[0][0], "500+")
 
+    def test_every_run_records_an_observation_with_its_traffic(self) -> None:
+        store_items(self.engine, parse_feed(FEED)[0], fetched_at="2026-10-06 03:40:00")
+        store_items(self.engine, parse_feed(feed(
+            item("台積電", "Mon, 5 Oct 2026 20:40:00 -0700", traffic="500+"),
+        ))[0], fetched_at="2026-10-06 04:00:00")
+
+        self.assertEqual(self.rows(
+            "SELECT o.approx_traffic FROM google_trends_observations o JOIN google_trends t USING (trend_id) "
+            "WHERE t.keyword = '台積電' ORDER BY o.observed_at"
+        ), [("200+",), ("500+",)])
+
     def test_first_observation_and_analysed_sentiment_are_kept(self) -> None:
         store_items(self.engine, parse_feed(FEED)[0], fetched_at="2026-10-06 03:50:00")
         connection = sqlite3.connect(self.path)

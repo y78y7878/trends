@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert
@@ -22,6 +23,7 @@ from trends.entity_resolution_etl import (
     normalize_entity_keyword,
 )
 from trends.keyword_classification import classify_pending_keywords
+from trends.theme_study import theme_basket
 
 
 class FakeEntityClassifier:
@@ -45,6 +47,10 @@ class FakeThemeClassifier:
 
 class EntityResolutionETLTests(TestCase):
     def setUp(self) -> None:
+        # Official code list: offline and empty unless a test sets one.
+        listed_patch = patch("trends.entity_resolution_etl.load_listed", return_value={})
+        self.load_listed = listed_patch.start()
+        self.addCleanup(listed_patch.stop)
         self.temporary_directory = TemporaryDirectory()
         database_path = Path(self.temporary_directory.name) / "entity-resolution.db"
         self.engine: Engine = get_engine(database_path)
@@ -91,7 +97,7 @@ class EntityResolutionETLTests(TestCase):
             "緯穎股價": ("緯穎", "6669", "科技類"),
             "玉山金": ("玉山金", "2884", "金融類"),
             "台新金股價": ("台新金", "2887", "金融類"),
-            "創意": ("創意", "3443", "科技類"),
+            "創意電子": ("創意電子", "3443", "科技類"),
             "2305全友": ("全友", "2305", "科技類"),
             "妖股全友": ("全友", "2305", "科技類"),
             "台燿": ("台燿", "6274", "科技類"),
@@ -126,6 +132,7 @@ class EntityResolutionETLTests(TestCase):
         by_keyword = {row["keyword"]: row for row in rows}
         entities_by_name = {entity["entity_name"]: entity for entity in entities}
         mapped_pairs = {(row["keyword"], row["stock_id"], row["theme_name"]) for row in mappings}
+        self.assertTrue(all(row["link_type"] == "direct" for row in mappings if row["stock_id"]))
         for keyword, (entity_name, stock_id, theme_name) in expected.items():
             with self.subTest(keyword=keyword):
                 row = by_keyword[keyword]
@@ -185,3 +192,132 @@ if __name__ == "__main__":
     import unittest
 
     unittest.main()
+
+class KeywordLinkTests(TestCase):
+    setUp = EntityResolutionETLTests.setUp
+    tearDown = EntityResolutionETLTests.tearDown
+    add_keywords = EntityResolutionETLTests.add_keywords
+
+    def classify(self, responses: dict[str, dict[str, object]]) -> list[dict]:
+        self.add_keywords(list(responses))
+        classify_pending_keywords(
+            self.engine, classifier=FakeEntityClassifier(responses), limit=100, resolve_entities=False,
+        )
+        with self.engine.connect() as connection:
+            return connection.execute(select(ThemeMapping.__table__)).mappings().all()
+
+    def answer(self, keyword: str, theme: str, link_type: str) -> dict[str, object]:
+        return {"keyword": keyword, "canonical_keyword": keyword, "theme_name": theme,
+                "sub_theme": "測試", "link_type": link_type, "confidence_score": 0.9}
+
+    def test_industry_word_links_to_the_curated_basket_only(self) -> None:
+        rows = self.classify({"保險": self.answer("保險", "金融類", "industry")})
+
+        self.assertEqual(sorted(row["stock_id"] for row in rows), sorted(theme_basket("金融類")))
+        self.assertTrue(all(row["link_type"] == "theme" for row in rows))
+
+    def test_people_and_unlisted_companies_get_no_stock(self) -> None:
+        rows = self.classify({
+            "謝金河": self.answer("謝金河", "金融類", "none"),
+            "Uber": self.answer("Uber", "科技類", "none"),
+        })
+
+        self.assertEqual({(row["keyword"], row["stock_id"], row["link_type"]) for row in rows},
+                         {("謝金河", None, None), ("Uber", None, None)})
+
+    def test_company_without_a_code_is_not_fanned_out(self) -> None:
+        rows = self.classify({"某公司": self.answer("某公司", "科技類", "company")})
+
+        self.assertEqual([(row["stock_id"], row["link_type"]) for row in rows], [(None, None)])
+
+    def test_letter_suffixed_etf_codes_resolve(self) -> None:
+        resolver = EntityResolver(self.engine)
+        result = resolver._normalize_prediction({
+            "keyword": "00631L", "canonical_entity": "元大台灣50正2", "entity_type": "ETF",
+            "stock_id": "00631l", "confidence_score": 0.9,
+        })
+
+        self.assertEqual(result["stock_id"], "00631L")
+
+    def test_ambiguous_everyday_words_never_resolve_to_a_company(self) -> None:
+        self.add_keywords(["創意", "創意電子"])
+        gemini = FakeEntityClassifier({
+            "創意": {"keyword": "創意", "canonical_entity": "創意", "entity_type": "上市公司",
+                     "stock_id": "3443", "industry": "ASIC", "confidence_score": 1.0},
+        })
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            links = connection.execute(select(ThemeMapping.keyword, ThemeMapping.stock_id)).all()
+        self.assertEqual(set(links), {("創意電子", "3443")})
+
+    def test_deactivated_fan_out_row_is_reenabled_as_a_direct_link(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(insert(ThemeMapping.__table__).values(
+                theme_name="金融類", keyword="玉山金", stock_id="2884", category="金融類", active=0,
+            ))
+        self.add_keywords(["玉山金"])
+
+        EntityResolver(self.engine, classifier=FakeEntityClassifier({})).run(limit=10)
+
+        with self.engine.connect() as connection:
+            row = connection.execute(select(ThemeMapping.active, ThemeMapping.link_type)).one()
+        self.assertEqual(tuple(row), (1, "direct"))
+
+    def test_company_outside_every_theme_still_links_to_its_stock(self) -> None:
+        self.add_keywords(["華航"])
+        gemini = FakeEntityClassifier({
+            "華航": {"keyword": "華航", "canonical_entity": "中華航空", "entity_type": "上市公司",
+                     "stock_id": "2610", "industry": "航空運輸", "confidence_score": 0.95},
+        })
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            row = connection.execute(select(
+                ThemeMapping.theme_name, ThemeMapping.keyword, ThemeMapping.stock_id, ThemeMapping.link_type,
+            ).where(ThemeMapping.stock_id.is_not(None))).one()
+        self.assertEqual(tuple(row), ("其他", "中華航空", "2610", "direct"))
+
+    def test_more_industries_map_to_existing_themes(self) -> None:
+        from trends.entity_resolution_etl import _theme_for_industry
+
+        for industry, theme in {"光電業": "科技類", "通信網路業": "科技類", "化學工業": "能源與原物料類",
+                                "水泥工業": "能源與原物料類", "重電工程": "綠能環保類", "航空運輸": "其他"}.items():
+            with self.subTest(industry=industry):
+                self.assertEqual(_theme_for_industry(industry), theme)
+
+
+    def test_gemini_code_of_a_differently_named_company_is_rejected(self) -> None:
+        self.load_listed.return_value = {"2466": "冠西電", "2891": "中信金"}
+        self.add_keywords(["冠德", "中國信託"])
+        gemini = FakeEntityClassifier({
+            "冠德": {"keyword": "冠德", "canonical_entity": "冠德", "entity_type": "上市公司",
+                     "stock_id": "2466", "industry": "建材營造", "confidence_score": 0.9},
+            "中國信託": {"keyword": "中國信託", "canonical_entity": "中國信託金融控股", "entity_type": "上市公司",
+                         "stock_id": "2891", "industry": "金控", "confidence_score": 0.9},
+        })
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            links = connection.execute(
+                select(ThemeMapping.keyword, ThemeMapping.stock_id).where(ThemeMapping.stock_id.is_not(None))
+            ).all()
+        self.assertEqual(set(links), {("中國信託金融控股", "2891")})
+
+    def test_bare_listed_codes_resolve_without_gemini_but_years_do_not(self) -> None:
+        self.load_listed.return_value = {"6467": "泰合", "2025": "千興"}
+        self.add_keywords(["6467", "2025"])
+        gemini = FakeEntityClassifier({})
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            links = connection.execute(
+                select(ThemeMapping.keyword, ThemeMapping.stock_id, ThemeMapping.link_type)
+                .where(ThemeMapping.stock_id.is_not(None))
+            ).all()
+        self.assertEqual(set(links), {("泰合", "6467", "direct")})
+        self.assertEqual(gemini.calls, [["2025"]])

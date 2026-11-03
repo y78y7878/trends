@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import time
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Sequence
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -14,14 +13,19 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.database import (
+    LINK_DIRECT,
+    LINK_THEME,
     GoogleTrend,
     GoogleTrendNews,
     KeywordClassification,
     ThemeMapping,
     init_db,
 )
+from trends.gemini_control import (
+    GeminiProgress, gemini_models, get_gemini_limiter, is_daily_quota_error, should_stop_batches,
+)
 from trends.keyword_mapping import load_keyword_mapping, match_keyword
-from trends.theme_study import THEME_DEFINITIONS, load_theme_mapping, normalize_theme_name
+from trends.theme_study import THEME_DEFINITIONS, load_theme_mapping, normalize_theme_name, theme_basket
 
 
 ALLOWED_THEMES = (*[normalize_theme_name(theme) for theme in THEME_DEFINITIONS], "其他")
@@ -29,41 +33,43 @@ EVENT_TYPES = (
     "營收利多", "新品發表", "法人調升", "法人調降", "政策利多", "政策利空", "市場情緒", "產業趨勢", "其他",
 )
 BATCH_SIZE = 20
+# link_type answers: the keyword is one listed company, an industry word that moves its theme's
+# curated basket, or neither (people, unlisted or foreign companies, events, everything else).
+LINK_COMPANY = "company"
+LINK_INDUSTRY = "industry"
+LINK_NONE = "none"
 
 
 def _daily_quota_exhausted(error: Exception) -> bool:
-    message = str(error).casefold()
-    return "quota exceeded" in message and ("perday" in message or "per day" in message)
+    return is_daily_quota_error(error)
 
 
 class KeywordBatchClassifier(Protocol):
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]: ...
 
 
-def _generate_json(client, model: str, prompt: str) -> dict[str, object]:
+def _generate_json(
+    client, models: str | Sequence[str], prompt: str, task: str = "gemini", items: int = 0
+) -> dict[str, object]:
     from google.genai import types
 
-    for attempt in range(4):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json"),
-            )
-            payload = json.loads(response.text or "{}")
-            return payload if isinstance(payload, dict) else {}
-        except Exception as error:
-            status_code = getattr(error, "status_code", None)
-            if status_code == 429 and _daily_quota_exhausted(error):
-                raise
-            if status_code not in {429, 500, 502, 503, 504} or attempt == 3:
-                raise
-            time.sleep(2 ** attempt)
-    return {}
+    # Every Gemini request shares one limiter: 5 per minute per model, 429/5xx retry policy,
+    # fallback to the next model, run stats.
+    limiter = get_gemini_limiter()
+    response = limiter.call(lambda model: client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type="application/json"),
+    ), [models] if isinstance(models, str) else models)
+    payload = json.loads(response.text or "{}")
+    limiter.stats.record_processed(task, items)
+    return payload if isinstance(payload, dict) else {}
 
 
 class GeminiKeywordClassifier:
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
+    task = "keyword"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not resolved_key:
@@ -71,7 +77,7 @@ class GeminiKeywordClassifier:
         from google import genai
 
         self._client = genai.Client(api_key=resolved_key)
-        self._model = model
+        self._models = (model,) if model else gemini_models()
 
     def classify_batch(self, keywords: list[str]) -> dict[str, dict[str, object]]:
         prompt = f"""
@@ -79,12 +85,17 @@ class GeminiKeywordClassifier:
 對每個輸入保留原始 keyword，將公司別名或噪音詞正規化為 canonical_keyword。
 例如「全友股價」「2305全友」「妖股全友」都應 canonicalize 為「全友」。
 主題只能是：{', '.join(ALLOWED_THEMES)}。
-sub_theme 使用簡短繁體中文分類；stock_related 只能為 0 或 1；confidence_score 範圍 0 到 1。
-無法判斷時 theme_name 用「其他」、confidence_score 用 0，不要臆測公司代號。
-只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","stock_related":0,"confidence_score":0.0}}]}}。
+sub_theme 使用簡短繁體中文分類；confidence_score 範圍 0 到 1。
+link_type 只能是：
+- company：關鍵字就是一家台灣上市櫃公司或 ETF（例如「元大金控」「台積電」）。
+- industry：直接描述該主題產業本身的用語（技術、原物料、產業名稱）或總體經濟、金融市場指標與政策，熱門時可能帶動該主題的同類股票（例如「保險」「伺服器」「先進封裝」「油價」「升息」「CPI」「外資」）。
+- none：其他一切，包括人名、未在台灣上市的外國公司、品牌、事件、娛樂或無法判斷者（例如「謝金河」「Uber」）。
+  以下也一律是 none：單一消費產品或型號（例如「AirPods 4」「HR-V」「Tesla Roadster」）、交通工具與軍事裝備（例如「機車」「波音787」「航空母艦」）、生活娛樂與活動（例如「夜市」「燒肉」「演唱會」）、個人理財生活用語（例如「套牢」「四貸同堂」）。
+無法判斷時 theme_name 用「其他」、link_type 用 none、confidence_score 用 0，不要臆測公司代號。
+只輸出符合 JSON MIME 的物件 {{"items":[{{"keyword":"原始輸入","canonical_keyword":"","theme_name":"","sub_theme":"","link_type":"none","confidence_score":0.0}}]}}。
 輸入：{json.dumps(keywords, ensure_ascii=False)}
 """
-        payload = _generate_json(self._client, self._model, prompt)
+        payload = _generate_json(self._client, self._models, prompt, task=self.task, items=len(keywords))
         return {
             str(item.get("keyword", "")): item
             for item in payload.get("items", [])
@@ -93,7 +104,7 @@ sub_theme 使用簡短繁體中文分類；stock_related 只能為 0 或 1；con
 
 
 class GeminiNewsClassifier:
-    def __init__(self, api_key: str | None = None, model: str = "gemini-3.6-flash") -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         load_dotenv()
         resolved_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not resolved_key:
@@ -101,7 +112,7 @@ class GeminiNewsClassifier:
         from google import genai
 
         self._client = genai.Client(api_key=resolved_key)
-        self._model = model
+        self._models = (model,) if model else gemini_models()
 
     def classify_batch(self, articles: list[dict[str, object]]) -> dict[int, dict[str, object]]:
         prompt = f"""
@@ -112,7 +123,7 @@ event_type 只能是：{', '.join(EVENT_TYPES)}。
 只輸出 JSON {{"items":[{{"news_id":1,"news_sentiment":"Neutral","sentiment_score":0.5,"event_type":"產業趨勢"}}]}}。
 新聞資料：{json.dumps(articles, ensure_ascii=False, default=str)}
 """
-        payload = _generate_json(self._client, self._model, prompt)
+        payload = _generate_json(self._client, self._models, prompt, task="news", items=len(articles))
         return {
             int(item["news_id"]): item
             for item in payload.get("items", [])
@@ -137,7 +148,7 @@ def _rule_classify(
         row = exact.iloc[0]
         return {
             "canonical_keyword": row["keyword"], "theme_name": row["theme_name"],
-            "sub_theme": row["sub_theme"], "stock_related": int(bool(row["stock_id"])),
+            "sub_theme": row["sub_theme"], "link_type": LINK_INDUSTRY if row["stock_id"] else LINK_NONE,
             "confidence_score": 1.0, "classification_source": "theme_mapping",
         }
 
@@ -154,7 +165,7 @@ def _rule_classify(
             "canonical_keyword": selected_name,
             "theme_name": "科技類" if stock_ids[0] in THEME_DEFINITIONS["科技類"]["stock_ids"] else "其他",
             "sub_theme": "公司與股票",
-            "stock_related": 1,
+            "link_type": LINK_COMPANY,
             "confidence_score": 0.7,
             "classification_source": "mapping_normalizer",
             "stock_ids": stock_ids,
@@ -165,12 +176,12 @@ def _rule_classify(
         row = matches.loc[matches["normalized"].str.len().idxmax()]
         return {
             "canonical_keyword": row["keyword"], "theme_name": row["theme_name"],
-            "sub_theme": row["sub_theme"], "stock_related": 1,
+            "sub_theme": row["sub_theme"], "link_type": LINK_INDUSTRY,
             "confidence_score": 0.5, "classification_source": "mapping_normalizer",
         }
     return {
         "canonical_keyword": keyword.strip(), "theme_name": "其他", "sub_theme": "未分類",
-        "stock_related": 0, "confidence_score": 0.0, "classification_source": "fallback",
+        "link_type": LINK_NONE, "confidence_score": 0.0, "classification_source": "fallback",
     }
 
 
@@ -180,38 +191,49 @@ def _validate_keyword_result(keyword: str, result: dict[str, object]) -> dict[st
         theme_name = "其他"
     canonical = str(result.get("canonical_keyword", keyword)).strip() or keyword.strip()
     confidence = pd.to_numeric(result.get("confidence_score", 0), errors="coerce")
-    stock_related = pd.to_numeric(result.get("stock_related", 0), errors="coerce")
+    stock_ids = [str(stock_id) for stock_id in result.get("stock_ids", [])]
+    link_type = str(result.get("link_type", LINK_NONE)).strip().casefold()
+    if link_type not in (LINK_COMPANY, LINK_INDUSTRY) or theme_name == "其他":
+        link_type = LINK_NONE
+    if stock_ids:
+        link_type = LINK_COMPANY
     return {
         "keyword": keyword,
         "canonical_keyword": canonical[:255],
         "theme_name": theme_name,
         "sub_theme": str(result.get("sub_theme", "未分類")).strip()[:100] or "未分類",
-        "stock_related": int(pd.notna(stock_related) and stock_related != 0),
+        "stock_related": int(link_type != LINK_NONE),
+        "link_type": link_type,
         "confidence_score": float(min(max(confidence if pd.notna(confidence) else 0, 0), 1)),
         "classification_source": str(result.get("classification_source", "gemini"))[:30],
-        "stock_ids": [str(stock_id) for stock_id in result.get("stock_ids", [])],
+        "stock_ids": stock_ids,
     }
 
 
-def _theme_stock_pool(engine: Engine, theme_name: str) -> list[str]:
-    with engine.connect() as connection:
-        rows = connection.execute(
-            select(ThemeMapping.stock_id).where(
-                ThemeMapping.theme_name == theme_name,
-                ThemeMapping.active == 1,
-                ThemeMapping.stock_id.is_not(None),
-            ).distinct()
-        ).scalars().all()
-    return [str(stock_id) for stock_id in rows]
+def _reactivating_insert(rows: list[dict[str, object]]):
+    """Insert theme_mapping links; a link that already exists (e.g. deactivated by p1_link_type
+    as fan-out) is re-enabled with the new link_type instead of being silently skipped."""
+    statement = insert(ThemeMapping.__table__).values(rows)
+    return statement.on_conflict_do_update(
+        index_elements=["theme_name", "keyword", "stock_id", "category"],
+        set_={"active": 1, "link_type": statement.excluded.link_type, "sub_theme": statement.excluded.sub_theme},
+    )
 
 
 def _upsert_theme_rows(engine: Engine, result: dict[str, object]) -> None:
     theme_name = str(result["theme_name"])
     canonical = str(result["canonical_keyword"])
     sub_theme = str(result["sub_theme"])
-    stock_ids = list(dict.fromkeys(result.get("stock_ids", [])))
-    if result["stock_related"] and not stock_ids:
-        stock_ids = _theme_stock_pool(engine, theme_name)
+    # A company links only to its own stock (one Gemini cannot name is left to entity
+    # resolution); an industry word links to the theme's curated basket, never to every stock
+    # that has ever been mapped to the theme.
+    link_type = None
+    stock_ids: list[str | None] = list(dict.fromkeys(result.get("stock_ids", [])))
+    if stock_ids:
+        link_type = LINK_DIRECT
+    elif result["link_type"] == LINK_INDUSTRY:
+        stock_ids = theme_basket(theme_name)
+        link_type = LINK_THEME if stock_ids else None
     if not stock_ids:
         stock_ids = [None]
     rows = [{
@@ -221,8 +243,9 @@ def _upsert_theme_rows(engine: Engine, result: dict[str, object]) -> None:
         "category": theme_name,
         "sub_theme": sub_theme,
         "active": 1,
+        "link_type": link_type if stock_id else None,
     } for stock_id in stock_ids]
-    statement = insert(ThemeMapping.__table__).values(rows).on_conflict_do_nothing()
+    statement = _reactivating_insert(rows)
     with engine.begin() as connection:
         previous = connection.execute(
             select(KeywordClassification.canonical_keyword, KeywordClassification.theme_name)
@@ -268,6 +291,7 @@ def classify_pending_keywords(
                 KeywordClassification.theme_name == "其他",
             ),
         )
+    progress = GeminiProgress.for_engine(db_engine)
     with db_engine.connect() as connection:
             statement = (
                 select(GoogleTrend.keyword)
@@ -276,9 +300,14 @@ def classify_pending_keywords(
                 .distinct()
                 .order_by(GoogleTrend.keyword)
             )
-            if limit > 0:
-                statement = statement.limit(limit)
             keywords = connection.execute(statement).scalars().all()
+    if ai_classifier is not None:
+        # Resume: keywords Gemini already answered stay out, even if a later step put them back
+        # into the pending set, so an interrupted backlog continues where it stopped.
+        done = progress.done("keyword")
+        keywords = [keyword for keyword in keywords if str(keyword) not in done]
+    if limit > 0:
+        keywords = keywords[:limit]
     if not keywords:
         return 0
 
@@ -287,16 +316,19 @@ def classify_pending_keywords(
         batch = [str(keyword) for keyword in keywords[start:start + max(batch_size, 1)]]
         predictions: dict[str, dict[str, object]] = {}
         ai_failed = False
-        daily_quota_hit = False
+        stop_run = False
         if ai_classifier is not None:
             try:
                 predictions = ai_classifier.classify_batch(batch)
             except Exception as error:
                 print(f"Keyword AI batch failed ({len(batch)} keywords): {error}")
                 ai_failed = True
-                daily_quota_hit = _daily_quota_exhausted(error)
+                stop_run = should_stop_batches(error)
+            else:
+                # Only keywords Gemini actually answered count as done; omitted ones retry next run.
+                progress.mark("keyword", [keyword for keyword in batch if keyword in predictions])
         if ai_failed:
-            if daily_quota_hit:
+            if stop_run:
                 break
             continue
         rows = []
@@ -361,7 +393,7 @@ def classify_pending_news(
             predictions = ai_classifier.classify_batch(batch)
         except Exception as error:
             print(f"News AI batch failed ({len(batch)} articles): {error}")
-            if _daily_quota_exhausted(error):
+            if should_stop_batches(error):
                 break
             continue
         updates = []

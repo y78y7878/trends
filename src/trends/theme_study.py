@@ -11,7 +11,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.engine import Engine
 
 from trends.alpha_signal import parse_traffic
-from trends.database import GoogleTrendsHistory, KeywordClassification, ThemeMapping, init_db
+from trends.database import LINK_THEME, GoogleTrendsHistory, KeywordClassification, ThemeMapping, init_db
 
 
 DEFAULT_THEME_MAPPING_PATH = Path(__file__).resolve().parents[2] / "theme_mapping.csv"
@@ -154,10 +154,19 @@ def load_theme_mapping(path: str | Path = DEFAULT_THEME_MAPPING_PATH) -> pd.Data
     return frame[frame["theme_name"].ne("") & frame["keyword"].ne("")].drop_duplicates().reset_index(drop=True)
 
 
+def theme_basket(theme_name: str, path: str | Path = DEFAULT_THEME_MAPPING_PATH) -> list[str]:
+    """The curated stocks of a theme in theme_mapping.csv: what an industry keyword links to."""
+    frame = load_theme_mapping(path)
+    rows = frame[frame["theme_name"].eq(normalize_theme_name(theme_name)) & frame["active"].eq("1")]
+    return list(dict.fromkeys(stock_id for stock_id in rows["stock_id"] if stock_id))
+
+
 def sync_theme_mapping(engine: Engine, path: str | Path = DEFAULT_THEME_MAPPING_PATH) -> int:
     db_engine = init_db(engine)
     frame = load_theme_mapping(path)
     rows = frame.where(frame.ne(""), None).to_dict(orient="records")
+    for row in rows:
+        row["link_type"] = LINK_THEME if row["stock_id"] else None
     with db_engine.begin() as connection:
         for table in (ThemeMapping, KeywordClassification, GoogleTrendsHistory):
             existing_names = connection.execute(select(table.theme_name).distinct()).scalars().all()
