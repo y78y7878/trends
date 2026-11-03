@@ -130,7 +130,7 @@ Windows 工作排程器 \Trends\
 │         → stocks（每檔重抓近 14 天）
 │
 ├─ Daily ETL        每天 4 次         run_etl.bat（02:00、08:00、14:00、20:00）
-│    └─ trends.etl --keyword-limit 400 --news-limit 1000（每個 Gemini 請求 50 筆）
+│    └─ trends.etl --keyword-limit 400 --news-limit 1000（每個 Gemini 請求 150 筆）
 │         1. Entity Resolution         → entity_master、keyword_classification
 │         2. 關鍵字 AI 分類（Gemini）   → keyword_classification、theme_mapping
 │         3. 未分類關鍵字自動分類
@@ -191,107 +191,7 @@ Streamlit Dashboard（app.py）── 唯讀查詢 data.db（快取 5 分鐘）
 - **資料工程**：多來源 ETL、自動化資料收集、SQLite 資料模型。
 - **資料分析**：事件研究、搜尋熱度、新聞情緒與股票報酬。
 - **商業分析**：市場主題辨識、事件影響評估與市場反應驗證。
-- **資料視覺化**：多來源單圖整合、事件績效表與聚焦式儀表板。# Social Media Trends Scraper (社群與搜尋趨勢爬蟲)
-
-這是一個用來自動抓取台灣 Google Trends 熱搜關鍵字及社群平台（目前支援PTT）熱門文章的 Python 爬蟲專案。透過自動化瀏覽器側錄 API 封包，獲取熱門文章的標題、連結、作者及互動熱度，並將資料持久化儲存至 MariaDB 資料庫中，以利後續的數據分析或趨勢落差比對。
-
-## ✨ 特色 (Features)
-* **無頭瀏覽器側錄**：使用 Playwright 模擬真實瀏覽器行為，透過監聽網路請求（Network Interception）側錄原生 API 回應，減少直接打 API 被阻擋的風險。
-* **Cloudflare 防護繞過**：針對 Dcard 的 JavaScript 挑戰（JS Challenge）與 403/429 限制，採用頁面自然載入與等待機制處理。
-* **資料庫整合**：自動解析時間格式並計算「互動分數」（讚數 + 留言數），統一寫入 MariaDB。
-
-## 🛠️ 環境需求 (Prerequisites)
-* Python 3.8+
-* MariaDB / MySQL
-* Chromium (透過 Playwright 安裝)
-
-## 🚀 快速開始 (Quick Start)
-
-### 1. 安裝套件
-請先在您的虛擬環境中安裝所需的 Python 套件：
-
-```bash
-pip install playwright pymysql python-dateutil requests
-```
-
-### 2. 初始化 Playwright 瀏覽器
-安裝 Playwright 運行所需的 Chromium 核心：
-
-```bash
-playwright install chromium
-```
-
-### 3. 建置資料庫
-請進入您的 MariaDB 控制台，建立資料庫並執行以下 SQL 語法建立相關資料表：
-
-```sql
-CREATE DATABASE IF NOT EXISTS trends CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE trends;
-
--- 1. 建立社群趨勢資料表
-CREATE TABLE IF NOT EXISTS social_trends (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    platform VARCHAR(50) NOT NULL,
-    category VARCHAR(100),
-    title VARCHAR(500) NOT NULL,
-    content_url VARCHAR(1000),
-    author VARCHAR(255),
-    engagement_score INT DEFAULT 0,
-    published_at DATETIME,
-    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_platform_fetched (platform, fetched_at),
-    INDEX idx_title (title)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- 2. 建立 Google Trends 主資料表
-CREATE TABLE IF NOT EXISTS google_trends (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    keyword VARCHAR(255) NOT NULL,
-    approx_traffic VARCHAR(50),
-    published_at DATETIME,
-    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_keyword (keyword),
-    INDEX idx_published (published_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- 3. 建立 Google Trends 新聞子資料表
-CREATE TABLE IF NOT EXISTS google_trends_news (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    trend_id INT NOT NULL,
-    news_title VARCHAR(500),
-    news_url VARCHAR(1000),
-    news_source VARCHAR(255),
-    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (trend_id) REFERENCES google_trends(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-```
-
-### 4. 設定資料庫密碼
-在爬蟲的 Python 檔案中，找到資料庫連線區塊，將密碼修改為您本地端的設定：
-
-```python
-conn = pymysql.connect(
-    host="localhost",
-    user="root",
-    password="your_password", # 請替換為您的密碼
-    database="trends",
-    charset="utf8mb4",
-    autocommit=True
-)
-```
-
-### 5. 執行爬蟲
-```bash
-python dcard_trends.py
-```
-
-## ⚠️ 已知問題與待辦事項 (Known Issues & TODOs)
-- [ ] **Dcard 爬取穩定性問題**：目前 Dcard 的 Cloudflare 防護極為嚴格，偶爾會觸發 `HTTP 403 (Forbidden)` 阻擋或 `HTTP 429 (Too Many Requests)` 限流。目前的解法是攔截前端原生封包，但若同 IP 請求過於頻繁，仍可能暫時抓不到資料（需等待 3~5 分鐘冷卻）。後續考慮引入代理池（Proxy Pool）或拉長排程間距。
-- [ ] 支援更多社群平台（如 PTT、Threads 等）。
-- [ ] 新增資料重複性檢查（使用 `content_url` 判斷是否已存在於資料庫）。
-
-## 📜 免責聲明 (Disclaimer)
-本專案僅供程式語言學習與技術研究之用。請遵守各平台的服務條款（Terms of Service），切勿將此工具用於惡意攻擊、高頻率壓測或商業營利用途。
+- **資料視覺化**：多來源單圖整合、事件績效表與聚焦式儀表板。
 
 ## Google Trends 與台股事件驅動分析平台
 
@@ -363,7 +263,7 @@ python -m trends.entity_resolution_etl --limit 500
 python -m trends.etl
 ```
 
-預設每次最多分類 200 個關鍵字與 200 篇新聞（各 10 次 Gemini 批次請求）；可使用 `--news-limit 0` 處理全部待分類新聞。若 API 回報每日配額耗盡，該層會停止並將剩餘列留待下次排程。正式運營由工作排程器每天台北時間 02:00、08:00、14:00、20:00 執行 `run_etl.bat`（每次最多 400 個關鍵字、1,000 篇新聞，每個 Gemini 請求 50 筆）（見[排程架構](#排程架構)）。
+預設每次最多分類 200 個關鍵字與 200 篇新聞（各 10 次 Gemini 批次請求）；可使用 `--news-limit 0` 處理全部待分類新聞。若 API 回報每日配額耗盡，該層會停止並將剩餘列留待下次排程。正式運營由工作排程器每天台北時間 02:00、08:00、14:00、20:00 執行 `run_etl.bat`（每次最多 400 個關鍵字、1,000 篇新聞，每個 Gemini 請求 150 筆）（見[排程架構](#排程架構)）。
 
 Dashboard 的「分類 RSS 關鍵字與新聞」按鈕則以每次 100 筆增量處理。所有語言與新聞來源都會納入；主題透過所屬 Trends keyword 的 classification 關聯，不依新聞語言或來源篩選。無 API key 時，keyword 可使用明確標記為 `fallback` 的規則分類；新聞 AI 分類會保留待處理，不會填入假造的 AI 結果。
 
