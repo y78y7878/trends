@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
+from unittest.mock import patch
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert
@@ -46,6 +47,10 @@ class FakeThemeClassifier:
 
 class EntityResolutionETLTests(TestCase):
     def setUp(self) -> None:
+        # Official code list: offline and empty unless a test sets one.
+        listed_patch = patch("trends.entity_resolution_etl.load_listed", return_value={})
+        self.load_listed = listed_patch.start()
+        self.addCleanup(listed_patch.stop)
         self.temporary_directory = TemporaryDirectory()
         database_path = Path(self.temporary_directory.name) / "entity-resolution.db"
         self.engine: Engine = get_engine(database_path)
@@ -282,3 +287,37 @@ class KeywordLinkTests(TestCase):
                                 "水泥工業": "能源與原物料類", "重電工程": "綠能環保類", "航空運輸": "其他"}.items():
             with self.subTest(industry=industry):
                 self.assertEqual(_theme_for_industry(industry), theme)
+
+
+    def test_gemini_code_of_a_differently_named_company_is_rejected(self) -> None:
+        self.load_listed.return_value = {"2466": "冠西電", "2891": "中信金"}
+        self.add_keywords(["冠德", "中國信託"])
+        gemini = FakeEntityClassifier({
+            "冠德": {"keyword": "冠德", "canonical_entity": "冠德", "entity_type": "上市公司",
+                     "stock_id": "2466", "industry": "建材營造", "confidence_score": 0.9},
+            "中國信託": {"keyword": "中國信託", "canonical_entity": "中國信託金融控股", "entity_type": "上市公司",
+                         "stock_id": "2891", "industry": "金控", "confidence_score": 0.9},
+        })
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            links = connection.execute(
+                select(ThemeMapping.keyword, ThemeMapping.stock_id).where(ThemeMapping.stock_id.is_not(None))
+            ).all()
+        self.assertEqual(set(links), {("中國信託金融控股", "2891")})
+
+    def test_bare_listed_codes_resolve_without_gemini_but_years_do_not(self) -> None:
+        self.load_listed.return_value = {"6467": "泰合", "2025": "千興"}
+        self.add_keywords(["6467", "2025"])
+        gemini = FakeEntityClassifier({})
+
+        EntityResolver(self.engine, classifier=gemini).run(limit=10)
+
+        with self.engine.connect() as connection:
+            links = connection.execute(
+                select(ThemeMapping.keyword, ThemeMapping.stock_id, ThemeMapping.link_type)
+                .where(ThemeMapping.stock_id.is_not(None))
+            ).all()
+        self.assertEqual(set(links), {("泰合", "6467", "direct")})
+        self.assertEqual(gemini.calls, [["2025"]])

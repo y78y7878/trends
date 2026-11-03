@@ -32,3 +32,6 @@ __pycache__/
 /0
 vscode-extensions.txt
 *.gemini_progress.json
+
+# 上市櫃公司官方名稱快取（trends.listed_companies，每週更新）
+*.listed_companies.json

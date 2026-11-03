@@ -26,6 +26,7 @@ from trends.database import (
 from trends.gemini_control import GeminiProgress, gemini_models, should_stop_batches
 from trends.keyword_classification import ALLOWED_THEMES, _generate_json, _reactivating_insert
 from trends.keyword_mapping import load_keyword_mapping
+from trends.listed_companies import load_listed, name_matches
 from trends.theme_study import normalize_theme_name
 
 
@@ -38,6 +39,8 @@ RESOLVED_ENTITY_TYPES = set(ENTITY_TYPES) - {"其他"}
 # Everyday words that are also a company's short name. As a trending search they almost never
 # mean the company, so they are never resolved to its stock (「創意電子」 still is).
 AMBIGUOUS_COMPANY_WORDS = frozenset({"創意", "全新"})
+LISTED_CODE = re.compile(r"\d{4,6}[A-Z]?")
+YEAR_LIKE = re.compile(r"20[23]\d")
 MIN_CONFIDENCE = 0.6
 BATCH_SIZE = 20
 
@@ -133,9 +136,12 @@ class EntityResolver:
         engine: Engine,
         classifier: EntityBatchClassifier | None = None,
         seed_path: str | Path = DEFAULT_ENTITY_SEED_PATH,
+        listed: dict[str, str] | None = None,
     ) -> None:
         self.engine = init_db(engine)
         self.classifier = classifier
+        # Official code -> name list; loaded on first use (None) so seed-only runs need no network.
+        self._listed = listed
         self.seeds = _load_entity_seeds(seed_path)
         self.keyword_mapping = load_keyword_mapping()
         self.seed_aliases: dict[str, dict[str, str]] = {}
@@ -160,6 +166,40 @@ class EntityResolver:
         except RuntimeError:
             return None
         return self.classifier
+
+    def _code_matches_name(self, result: dict[str, object]) -> bool:
+        """False when a Gemini stock code belongs to a differently named listed company.
+        Codes missing from the official list (e.g. emerging or innovation-board stocks) pass."""
+        stock_id = str(result["stock_id"])
+        if not stock_id:
+            return True
+        if self._listed is None:
+            self._listed = load_listed()
+        official = self._listed.get(stock_id)
+        return official is None or name_matches(str(result["canonical_entity"]), official)
+
+    def _resolve_listed_code(self, keyword: str) -> dict[str, object] | None:
+        """A keyword that is itself a listed code (e.g. 「6467」) is that company; Gemini often
+        guessed a different name for bare codes. Year-like codes (2020-2039) are left alone,
+        since a trending 「2025」 means the year far more often than 千興."""
+        code = keyword.strip().upper()
+        if not LISTED_CODE.fullmatch(code) or YEAR_LIKE.fullmatch(code):
+            return None
+        if self._listed is None:
+            self._listed = load_listed()
+        official = self._listed.get(code)
+        if not official:
+            return None
+        is_etf = code.startswith("00")
+        return {
+            "canonical_entity": official,
+            "entity_type": "ETF" if is_etf else "上市公司",
+            "stock_id": code,
+            "industry": "ETF" if is_etf else "",
+            "theme_name": "金融類" if is_etf else "其他",
+            "confidence_score": 1.0,
+            "data_source": "listed_companies",
+        }
 
     def _resolve_known_company(self, keyword: str) -> dict[str, object] | None:
         normalized = normalize_entity_keyword(keyword)
@@ -374,7 +414,11 @@ class EntityResolver:
         known_results: list[tuple[str, dict[str, object]]] = []
         unresolved_all: list[str] = []
         for keyword in keywords:
-            known = self._resolve_known_company(keyword) or self._resolve_industry(keyword)
+            known = (
+                self._resolve_known_company(keyword)
+                or self._resolve_listed_code(keyword)
+                or self._resolve_industry(keyword)
+            )
             if known is None:
                 unresolved_all.append(keyword)
             else:
@@ -408,6 +452,10 @@ class EntityResolver:
             for keyword in unresolved:
                 result = self._normalize_prediction(predictions.get(keyword, {}))
                 if result is not None and result["stock_id"] and normalize_entity_keyword(keyword) in AMBIGUOUS_COMPANY_WORDS:
+                    result = None
+                if result is not None and not self._code_matches_name(result):
+                    print(f"[ENTITY] rejected {keyword}: {result['stock_id']} is "
+                          f"{self._listed.get(result['stock_id'])}, not {result['canonical_entity']}")
                     result = None
                 if result is not None:
                     results.append((keyword, result))
