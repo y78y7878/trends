@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pandas as pd
 
 import trends.dashboard as dashboard
+import trends.web.data as web_data
 from trends.database import get_engine, init_db
 
 
@@ -71,7 +72,7 @@ class ResearchStartFilterTests(unittest.TestCase):
             connection.commit()
             connection.close()
             try:
-                with patch.object(dashboard, "database_engine", return_value=engine):
+                with patch.object(web_data, "database_engine", return_value=engine):
                     dashboard.load_trend_observations.clear()
                     observations = dashboard.load_trend_observations()
                     dashboard.load_trend_observations.clear()
@@ -92,7 +93,7 @@ class TimeConventionTests(unittest.TestCase):
 
     def test_display_and_etl_code_use_timeutil_only(self) -> None:
         forbidden = re.compile(r"datetime\.now\(|date\.today\(|Timestamp\.now\(|Timestamp\.today\(|ZoneInfo\(|tz_localize\(|tz_convert\(")
-        for name in ("dashboard.py", "etl.py", "rss_collector.py"):
+        for name in ("dashboard.py", "web/data.py", "etl.py", "rss_collector.py"):
             with self.subTest(name=name):
                 self.assertIsNone(forbidden.search(self.source(name)), name)
 

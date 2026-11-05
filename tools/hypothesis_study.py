@@ -112,6 +112,7 @@ def main() -> None:
     links = links[links["stock_id"].str.fullmatch(r"\d{4,6}[A-Z]?") & ~links["stock_id"].str.startswith("00")]
     wide = data["prices"].pivot(index="date", columns="stock_id", values="adj_close").sort_index()
     wide.index = pd.to_datetime(wide.index)
+    wide = wide[wide[BENCHMARK].notna()]     # Taiwan trading days only (US tickers add extra days)
     ar = forward_ar(wide, args.mode)
     trading_days = wide.index
     period = trading_days[trading_days >= pd.Timestamp(args.start)]
