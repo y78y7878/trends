@@ -59,9 +59,12 @@ def build_events(trends: pd.DataFrame, classes: pd.DataFrame, news: pd.DataFrame
 
 
 def price_table(prices: pd.DataFrame) -> pd.DataFrame:
+    """Trading day x stock adjusted closes, on Taiwan trading days only. The table also holds US
+    tickers (NVDA, TSLA...), whose extra trading days would otherwise put NaN rows into every
+    Taiwan stock and make "N trading days" windows shorter than N Taiwan sessions."""
     wide = prices.pivot(index="date", columns="stock_id", values="adj_close").sort_index()
     wide.index = pd.to_datetime(wide.index)
-    return wide
+    return wide[wide[BENCHMARK].notna()]
 
 
 def taiwan_links(links: pd.DataFrame) -> pd.DataFrame:

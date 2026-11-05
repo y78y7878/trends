@@ -130,12 +130,9 @@ def report(name: str, frame: pd.DataFrame) -> None:
     print(f"  {name:<34} n={len(frame):4d}  " + "  ".join(parts))
 
 
-def main() -> None:
-    frames = load_frames()
-    wide = price_table(frames["prices"])
-    daily_ar = wide.pct_change(fill_method=None).sub(wide[BENCHMARK].pct_change(fill_method=None), axis=0)
-    period = daily_ar[daily_ar.index >= pd.Timestamp(START)]
-    normal = period.mean()
+def attention_signals(frames: dict, wide: pd.DataFrame, verbose: bool = True) -> dict[str, object]:
+    """The three attention signals as (stock_id, date) event tables, plus the PTT daily mention
+    matrix. Shared with tools/volatility_study.py."""
     links = taiwan_links(frames["links"])
     universe = sorted(set(links["stock_id"]) & set(wide.columns))
     direct = links[links["link_type"].eq("direct")]
@@ -144,8 +141,6 @@ def main() -> None:
     posts = pd.read_sql("SELECT post_id, posted_at, category, title, push_score FROM ptt_posts WHERE posted_at >= ?", ptt,
                         params=(f"{START} 00:00:00",))
     comments = pd.read_sql("SELECT commented_at, text FROM ptt_comments WHERE commented_at IS NOT NULL", ptt)
-    print(f"PTT: {len(posts):,} posts, {len(comments):,} chat-thread comments; universe {len(universe)} stocks")
-
     pattern, alias = build_matcher(universe, frames["links"])
     texts = pd.concat([
         pd.DataFrame({"when": taipei(posts["posted_at"]), "text": posts["title"]}),
@@ -153,13 +148,13 @@ def main() -> None:
     ])
     found = mentions(texts, pattern, alias)
     found["date"] = found["when"].dt.normalize()
-    print(f"mentions: {len(found):,} across {found['stock_id'].nunique()} stocks; "
-          f"top: {found['stock_id'].value_counts().head(6).to_dict()}")
     calendar = pd.date_range(START, found["date"].max(), freq="D")
     daily = found.groupby(["date", "stock_id"]).size().unstack(fill_value=0).reindex(calendar, fill_value=0)
+    if verbose:
+        print(f"PTT: {len(posts):,} posts, {len(comments):,} chat-thread comments; universe {len(universe)} stocks")
+        print(f"mentions: {len(found):,} across {found['stock_id'].nunique()} stocks; "
+              f"top: {found['stock_id'].value_counts().head(6).to_dict()}")
 
-    # Signals.
-    ptt_events = spike_events(daily)
     rss = build_events(frames["trends"], frames["classes"], frames["news"]).merge(direct[["keyword", "stock_id"]], on="keyword")
     rss = rss.drop_duplicates(["stock_id", "date"])
     history = pd.read_sql("SELECT keyword, trend_date, trend_score FROM google_trends_history",
@@ -175,7 +170,19 @@ def main() -> None:
             if last is None or (day - last).days > QUIET_DAYS:
                 heat_rows.append({"stock_id": stock, "date": day})
             last = day
-    heat = pd.DataFrame(heat_rows).drop_duplicates(["stock_id", "date"])
+    heat = pd.DataFrame(heat_rows, columns=["stock_id", "date"]).drop_duplicates(["stock_id", "date"])
+    return {"rss": rss, "ptt": spike_events(daily), "heat": heat, "daily": daily, "posts": posts,
+            "found": found, "universe": universe}
+
+
+def main() -> None:
+    frames = load_frames()
+    wide = price_table(frames["prices"])
+    daily_ar = wide.pct_change(fill_method=None).sub(wide[BENCHMARK].pct_change(fill_method=None), axis=0)
+    period = daily_ar[daily_ar.index >= pd.Timestamp(START)]
+    normal = period.mean()
+    signals = attention_signals(frames, wide)
+    rss, ptt_events, heat, daily, posts, found = (signals[k] for k in ("rss", "ptt", "heat", "daily", "posts", "found"))
 
     print("\n== 三種訊號：事件前後的超額報酬（扣 0050、扣平常水準；後 N 日從事件當天收盤起算）==")
     results = {}
