@@ -55,7 +55,7 @@ def page_quickstart() -> None:
     st.subheader("其他頁面")
     ui.cards([
         ("市場雷達", "現在哪些產業的搜尋熱度在升溫？相關新聞偏正面還是負面？同類股最近表現如何？"),
-        ("研究結論", "把所有事件放在一起統計：熱搜之後買進，平均來說有沒有比大盤好？答案用一張圖說明。"),
+        ("研究結論", "把所有事件放在一起統計：熱搜之後買進，平均來說有沒有比大盤好？之後會不會比較會動？答案用圖說明。"),
     ])
     left, right = st.columns(2)
     with left:
@@ -102,12 +102,13 @@ def page_stock_events() -> None:
     events = stock.events[stock.events["event_date"].between(start, end)] if not stock.events.empty else stock.events
 
     _summary(stock, events)
+    _volatility(stock)
     with st.expander("看圖小教學", expanded=not st.session_state.get("seen_chart_help"), icon=":material/school:"):
         st.markdown(
             "1. **圓圈數字**＝事件（關鍵字爆紅的那天），滑鼠移上去看關鍵字、原因與新聞標題。\n"
             "2. **圓圈顏色**和後面**加粗的線段**＝之後 10 個交易日扣掉大盤的表現，綠色贏大盤、紅色輸大盤、灰色還沒有足夠天數。\n"
             "3. 往下看第 ② 層的**搜尋熱度**是不是同時衝高，第 ③ 層的**新聞**是正面還是負面。\n"
-            "4. 拖曳可以放大，雙擊回復。完整新聞與數字在圖下方的事件卡片。"
+            "4. 拖曳可以放大，雙擊回復。完整新聞與數字在圖下方的事件卡片，卡片也會列出事件前後的**波動**是平常的幾倍。"
         )
         st.session_state["seen_chart_help"] = True
     if len(events) > 40:
@@ -143,6 +144,25 @@ def _summary(stock: data.StockEvents, events: pd.DataFrame) -> None:
         columns[3].metric("事件比平常", f"{diff:+.1%}", help="大於 0 代表事件後表現比平常好。事件少於 10 個時參考價值有限。")
     else:
         columns[3].metric("事件比平常", "—")
+
+
+def _volatility(stock: data.StockEvents) -> None:
+    """The one signal the research found predictive: is the stock moving more than usual lately?"""
+    vol = stock.volatility
+    if not vol:
+        return
+    level, kind = ui.volatility_level(vol["ratio"])
+    with st.container(border=True):
+        left, right = st.columns([1, 3])
+        left.metric("近 20 日波動", f"平常的 {vol['ratio']:.1f} 倍",
+                    help="最近 20 個交易日的平均每日波動 ÷ 再往前 40 個交易日的平均。波動＝每天的漲跌和大盤差多少（不分漲跌）。")
+        left.markdown(ui.chip(level, kind), unsafe_allow_html=True)
+        right.markdown(
+            f"截至 {pd.Timestamp(vol['date']):%m-%d}，最近 20 個交易日這檔股票平均每天和大盤差 <b>{vol['recent']:.2%}</b>，"
+            f"平常（再往前 40 個交易日）是 {vol['usual']:.2%}。<br>"
+            "<span class='muted'>研究發現：<b>最近比平常動盪的股票，接下來幾天通常也比較會動</b>；"
+            "熱搜和討論區的關注沒有額外的預測力，所以想知道「接下來會不會大動」，看這個數字比看熱搜更準。"
+            "它只說明幅度，不代表會漲或會跌。</span>", unsafe_allow_html=True)
 
 
 # ---------- ③ market radar ----------
@@ -219,6 +239,35 @@ def page_findings() -> None:
         f"資料期間 2026-08-21～{pd.Timestamp(results['period_end']):%Y-%m-%d}，直接事件 {results['units'].get('direct', 0)} 個、"
         f"主題事件 {results['units'].get('theme', 0)} 個。樣本還不多，結論會隨資料累積每月更新。"
         "淺色帶是 95% 信賴區間：帶子越寬，代表越不確定。", icon=":material/info:")
-    ui.glossary(["超額報酬", "平常水準", "直接事件", "主題事件"])
+    _volatility_findings()
+    ui.glossary(["超額報酬", "平常水準", "直接事件", "主題事件", "近期波動"])
     _go("method", "想知道怎麼算的？看「研究方法」", ":material/functions:")
     st.caption("這是歷史資料的關聯研究，不預測未來股價，也不構成投資建議。")
+
+
+def _volatility_findings() -> None:
+    study = data.VOLATILITY_STUDY
+    rss = study["signals"][0]
+    gap_before = rss["before"][0] / rss["before"][1] - 1
+    gap_after = rss["after"][0] / rss["after"][1] - 1
+    st.subheader("被熱搜的股票，之後會比較會動嗎？")
+    st.markdown(
+        "會，但<b>看股價本身就知道</b>。被熱搜或在 PTT 被熱烈討論的股票，之後幾天的波動確實比較大；"
+        "可是它們在<b>被關注之前</b>就已經比較動盪，而且差距幾乎一樣大。", unsafe_allow_html=True)
+    st.plotly_chart(charts.volatility_chart(study), width="stretch", config={"displaylogo": False})
+    ui.cards([
+        ("直接比較：看起來有關",
+         f"和當天漲跌幅度差不多、但沒上熱搜的股票比，熱搜後 1–5 天的波動多約 <b>{gap_after:.0%}</b>（t = {rss['matched_t']:.1f}）。"),
+        ("但被關注之前就不一樣",
+         f"同樣兩組股票，熱搜<b>前</b> 5 天的波動就已經差了約 <b>{gap_before:.0%}</b>。"
+         "比較像是動盪的股票容易上熱搜，而不是熱搜讓股票變動盪。"),
+        ("考慮最近的波動後：歸零",
+         "把「今天的波動」和「最近 20 天的波動」一起放進統計模型，熱搜、PTT、搜尋熱度多出的效果都接近 0（|t| < 2）；"
+         f"最近 20 天的波動本身則非常顯著（t = {study['past20_t']:.0f}）。"),
+    ])
+    st.markdown("實用上：想知道一檔股票接下來會不會大動，看「個股事件圖」上的<b>近 20 日波動</b>就好。", unsafe_allow_html=True)
+    _go("stock", "前往個股事件圖", ":material/candlestick_chart:")
+    st.caption(
+        f"波動＝每天的漲跌和大盤（0050）差多少，以該股票再往前 40 個交易日的平均為 1 倍。研究期間整體比之前平靜"
+        f"（平均 {study['period_mean']:.2f} 倍），所以兩組都低於 1，重點是兩組的差距。資料 {study['period']}，"
+        "2026-11-05 的研究結果，不會隨資料自動更新。")

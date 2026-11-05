@@ -142,6 +142,30 @@ def car_chart(paths: pd.DataFrame) -> go.Figure:
     return figure
 
 
+def volatility_chart(study: dict) -> go.Figure:
+    """Per attention signal: volatility before and after the event, event stocks vs matched controls."""
+    signals = study["signals"]
+    figure = make_subplots(rows=1, cols=len(signals), shared_yaxes=True, horizontal_spacing=0.04,
+                           subplot_titles=[f"{s['name']}（{s['events']} 個事件）" for s in signals])
+    periods = ["事件前 5 日", "事件後 1–5 日"]
+    for col, signal in enumerate(signals, 1):
+        for index, (name, color) in enumerate((("被關注的股票", HEAT), ("對照：當天漲跌相近、沒被關注", NEUTRAL))):
+            values = [signal["before"][index], signal["after"][index]]
+            figure.add_trace(go.Bar(
+                x=periods, y=values, name=name, marker={"color": color, "line": {"color": "white", "width": 2}},
+                text=[f"{v:.2f}" for v in values], textposition="outside", textfont={"color": INK},
+                showlegend=col == 1, legendgroup=name,
+                hovertemplate=f"{signal['name']}｜%{{x}}<br>{name}：平常的 %{{y:.2f}} 倍<extra></extra>",
+            ), row=1, col=col)
+    figure.update_layout(
+        height=380, template="plotly_white", barmode="group", bargap=0.35, bargroupgap=0.08,
+        margin={"t": 40, "b": 10, "l": 10, "r": 10}, legend={"orientation": "h", "y": -0.15},
+    )
+    figure.update_yaxes(range=[0, 1.1], gridcolor="#eceee9")
+    figure.update_yaxes(title="波動（平常的幾倍）", row=1, col=1)
+    return figure
+
+
 def radar_chart(radar: pd.DataFrame) -> go.Figure:
     """Heat change vs basket return per theme; bubble size = news count."""
     radar = radar.dropna(subset=["heat_change", "return_10d"])

@@ -49,6 +49,8 @@ LOW_SENTIMENT_COVERAGE_MESSAGE = "情緒樣本不足，請謹慎解讀"
 # Event returns are compared with this ETF so a rising market is not read as an event effect.
 BENCHMARK_STOCK = "0050"
 LINK_LABELS = {LINK_DIRECT: "直接", LINK_THEME: "主題"}
+VOLATILITY_RECENT_DAYS = 20
+VOLATILITY_USUAL_DAYS = 40
 ETL_HOURS = (2, 8, 14, 20)
 LOG_DIR = DB_PATH.parent / "logs"
 LISTED_CACHE = DB_PATH.with_name(f"{DB_PATH.stem}.listed_companies.json")
@@ -304,6 +306,7 @@ class StockEvents:
     news: pd.DataFrame                   # every matched news item
     normal: dict[int, float] = field(default_factory=dict)
     keywords: dict[str, str] = field(default_factory=dict)   # keyword -> link type
+    volatility: dict[str, object] = field(default_factory=dict)   # latest day of volatility_table
 
 
 def _match_keywords(observations: pd.DataFrame, keywords: list[str]) -> pd.DataFrame:
@@ -345,16 +348,48 @@ def build_stock_events(stock_id: str, link_types: tuple[str, ...]) -> StockEvent
     )
     triggers = triggers[triggers["event_date"] >= RESEARCH_START]
     benchmark = load_prices(BENCHMARK_STOCK, warmup)
+    # Taiwan codes only: the volatility windows count Taiwan trading days (0050's dates).
+    volatility = volatility_table(prices, benchmark) if re.fullmatch(r"\d{4,6}[A-Z]?", stock_id) else pd.DataFrame()
     events = pd.DataFrame()
     if not triggers.empty:
         triggers = triggers.assign(stock_id=stock_id, link_type=triggers["keyword"].map(keyword_types))
         performance = calculate_event_performance(triggers, load_prices(stock_id, warmup), benchmark)
         events = _merge_event_days(performance, news)
+    if not events.empty and not volatility.empty:
+        day0 = pd.to_datetime(events["market_date"]).dt.normalize()
+        events["vol_before"] = day0.map(volatility["before"]).to_numpy()
+        events["vol_after5"] = day0.map(volatility["after5"]).to_numpy()
+    latest = volatility.dropna(subset=["ratio"]).tail(1) if not volatility.empty else volatility
+    current = {"date": latest.index[0], **latest.iloc[0][["ratio", "recent", "usual"]].to_dict()} if not latest.empty else {}
 
     news_daily = (news.groupby(["date", "news_sentiment"]).size().unstack(fill_value=0)
               .reindex(columns=[*ANALYZED_SENTIMENTS, UNANALYZED], fill_value=0).reset_index())
     normal = normal_excess_returns(load_prices(stock_id, warmup), benchmark, RESEARCH_START, prices["date"].max())
-    return StockEvents(stock_id, prices, heat, news_daily, events, news, normal, keyword_types)
+    return StockEvents(stock_id, prices, heat, news_daily, events, news, normal, keyword_types, current)
+
+
+def volatility_table(prices: pd.DataFrame, benchmark: pd.DataFrame) -> pd.DataFrame:
+    """Daily move = |stock return − 0050's| on Taiwan trading days. Per day: ``recent`` = mean move
+    over the 20 trading days ending that day, ``usual`` = over the 40 before them, ``ratio`` =
+    recent / usual. For a day 0: ``before`` = t-20..t-1 and ``after5`` = t+1..t+5, both against
+    the usual level before the event. The 2026-11-05 study found ``before`` predicts the next
+    days' moves and attention adds nothing to it (docs/hypothesis_study.md)."""
+    def closes(frame: pd.DataFrame) -> pd.Series:
+        frame = frame.assign(date=pd.to_datetime(frame["date"]).dt.normalize()).drop_duplicates("date").set_index("date")
+        column = "adj_close" if "adj_close" in frame and frame["adj_close"].notna().any() else "close"
+        return pd.to_numeric(frame[column], errors="coerce").sort_index()
+
+    bench = closes(benchmark)
+    if bench.empty or prices.empty:
+        return pd.DataFrame()
+    moves = (closes(prices).reindex(bench.index).pct_change(fill_method=None) - bench.pct_change(fill_method=None)).abs()
+    recent = moves.rolling(VOLATILITY_RECENT_DAYS, min_periods=15).mean()
+    usual = moves.shift(VOLATILITY_RECENT_DAYS).rolling(VOLATILITY_USUAL_DAYS, min_periods=25).mean()
+    return pd.DataFrame({
+        "move": moves, "recent": recent, "usual": usual, "ratio": recent / usual,
+        "before": (recent / usual).shift(1),
+        "after5": moves.rolling(5).mean().shift(-5) / usual.shift(1),
+    })
 
 
 def _merge_event_days(performance: pd.DataFrame, news: pd.DataFrame) -> pd.DataFrame:
@@ -428,6 +463,24 @@ def build_market_radar() -> pd.DataFrame:
 
 
 # ---------- research ----------
+
+# tools/volatility_study.py, 2026-11-05 (docs/hypothesis_study.md). Kept static: the study also
+# needs ptt_stock.db, a one-off PTT backfill the Dashboard does not have. Volatility is in
+# multiples of each stock's usual level; (event, matched control) pairs; "extra" = what the signal
+# adds to the next 1-5 days once today's and the last 20 days' volatility are known.
+VOLATILITY_STUDY = {
+    "period": "2026-08-21～10-20（40 個交易日、204 檔）",
+    "period_mean": 0.82,
+    "signals": [
+        {"name": "Google 熱搜", "events": 318, "before": (0.90, 0.79), "after": (0.94, 0.83), "matched_t": 4.0,
+         "extra": -0.006, "extra_t": -0.1},
+        {"name": "PTT 討論爆量", "events": 154, "before": (0.80, 0.76), "after": (0.88, 0.81), "matched_t": 2.5,
+         "extra": -0.014, "extra_t": -0.5},
+        {"name": "搜尋熱度上升", "events": 833, "before": (0.83, 0.73), "after": (0.87, 0.75), "matched_t": 8.0,
+         "extra": 0.027, "extra_t": 1.5},
+    ],
+    "past20_t": 11.3,
+}
 
 @st.cache_data(ttl=3600, show_spinner="計算研究結果…")
 def research_results() -> dict[str, object]:

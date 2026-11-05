@@ -22,6 +22,8 @@ GLOSSARY = {
     "超額報酬": "股票的漲跌減掉同期大盤（0050）的漲跌。大盤一起漲的部分不算熱搜的功勞。",
     "平常水準": "這檔股票在研究期間「任何一天」買進，平均能贏大盤多少。事件後的超額報酬要比這個高，才算熱搜真的有影響。",
     "新聞情緒": "AI（Gemini）讀新聞標題後判斷偏正面、中性或負面；尚未分析的新聞另外標示，不會當成中性。",
+    "近期波動": "股票每天的漲跌和大盤（0050）差多少，取最近 20 個交易日的平均；「平常的 X 倍」是和再往前 40 個交易日比較。"
+               "研究發現它能預測接下來幾天的波動，熱搜則沒有額外的預測力。只代表幅度，不代表漲或跌。",
 }
 
 
@@ -61,6 +63,17 @@ def return_chip(label: str, value: object) -> str:
         return chip(f"{label} 尚無資料", "flat")
     value = float(value)
     return chip(f"{label} {value:+.1%}", "up" if value > 0 else "down" if value < 0 else "flat")
+
+
+def volatility_level(ratio: float) -> tuple[str, str]:
+    """Plain-language level and chip kind for a recent / usual volatility ratio."""
+    if ratio >= 1.5:
+        return "明顯比平常動盪", "down"
+    if ratio >= 1.2:
+        return "比平常動盪", "heat"
+    if ratio > 0.8:
+        return "和平常差不多", "flat"
+    return "比平常平靜", "flat"
 
 
 def cards(items: list[tuple[str, str]], columns: int | None = None) -> None:
@@ -131,6 +144,11 @@ def event_card(event: pd.Series, normal_10d: float | None) -> None:
             if normal_10d is not None and excess is not None and pd.notna(excess):
                 verdict = "比平常好" if excess - normal_10d > 0.01 else "比平常差" if excess - normal_10d < -0.01 else "和平常差不多"
                 st.markdown(f"<span class='muted'>這檔股票平常 10 日約 {normal_10d:+.1%}，這次 <b>{verdict}</b></span>",
+                            unsafe_allow_html=True)
+            before, after = event.get("vol_before"), event.get("vol_after5")
+            if before is not None and pd.notna(before):
+                after_text = f"，之後 5 日 <b>{after:.1f} 倍</b>" if after is not None and pd.notna(after) else "，之後 5 日還沒滿"
+                st.markdown(f"<span class='muted'>波動：事件前 20 日是平常的 <b>{before:.1f} 倍</b>{after_text}</span>",
                             unsafe_allow_html=True)
 
 
